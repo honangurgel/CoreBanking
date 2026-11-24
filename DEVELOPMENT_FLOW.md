@@ -1,4 +1,4 @@
-# Fluxo de desenvolvimento
+﻿# Fluxo de desenvolvimento
 
 Este documento define a sequência de implementação do CoreBanking. O objetivo é entregar incrementos executáveis e verificáveis, mantendo os invariantes financeiros e a integração fictícia como prioridades.
 

@@ -1,4 +1,4 @@
-using CoreBanking.Application;
+﻿using CoreBanking.Application;
 using CoreBanking.Application.Deposits;
 using CoreBanking.Application.Pix;
 using CoreBanking.Application.Transfers;
@@ -8,7 +8,9 @@ using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Deposits;
 using CoreBanking.Infrastructure.Pix;
 using CoreBanking.Infrastructure.Transfers;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,7 +23,31 @@ builder.Services.AddScoped<ITransferService, TransferService>();
 builder.Services.AddScoped<IDepositService, DepositService>();
 builder.Services.AddScoped<IPixService, PixService>();
 
+var permitsPerMinute = builder.Configuration.GetValue<int?>("RateLimiting:PermitsPerMinute") ?? 600;
+if (permitsPerMinute < 1)
+{
+    throw new InvalidOperationException("RateLimiting:PermitsPerMinute deve ser maior que zero.");
+}
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        context.Request.Path.StartsWithSegments("/health")
+            ? RateLimitPartition.GetNoLimiter("health")
+            : RateLimitPartition.GetFixedWindowLimiter(
+                context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = permitsPerMinute,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0
+                }));
+});
+
 var app = builder.Build();
+
+app.UseRateLimiter();
 
 if (app.Environment.IsDevelopment())
 {
