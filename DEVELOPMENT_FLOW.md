@@ -94,7 +94,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** emular o serviço externo sem acessar sistemas reais.
 
-**Status:** um serviço independente fornece catálogo estático de instituições e respostas fictícias de confirmação, rejeição e indisponibilidade, com atraso configurável por requisição. Ainda não há adaptador no worker, persistência de operações, limites compartilhados ou processamento Pix integrado.
+**Status:** serviço independente com catálogo estático e respostas fictícias; worker Pix integrado por HTTP local, com estados persistidos. Limites de taxa e concorrência compartilhados para o simulador ainda não foram implementados.
 
 - Criar um serviço local com contratos fictícios para consulta, comunicação, liquidação e reporte.
 - Usar nomes e códigos públicos de instituições reais apenas como referência; clientes, contas, chaves e liquidações serão fictícios, sem comunicação com instituições reais.
@@ -109,7 +109,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** ampliar pagamentos usando o fluxo assíncrono e os invariantes já estabelecidos.
 
-**Decisões para implementação:** envio e recebimento; limite de R$ 999.999.999.999.999,99 (99.999.999.999.999.999 centavos) por operação; reservar saldo de envio enquanto pendente e mantê-lo em revisão manual quando se esgotarem as tentativas sem resposta. Nada disso está implementado ainda.
+**Status:** envio e recebimento fictícios, limite de R$ 999.999.999.999.999,99 (99.999.999.999.999.999 centavos), reserva contábil e revisão manual foram introduzidos. O processamento é persistido no PostgreSQL e o simulador é determinístico e sem estado. Controle compartilhado de taxa, testes de carga e validação operacional ampliada permanecem pendentes.
 
 - Criar chaves fictícias e regras de transferência Pix exclusivamente internas ao simulador.
 - Implementar validação, limites por operação e estado pendente até confirmação necessária.

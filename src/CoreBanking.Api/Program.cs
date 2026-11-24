@@ -1,10 +1,12 @@
 using CoreBanking.Application;
 using CoreBanking.Application.Deposits;
+using CoreBanking.Application.Pix;
 using CoreBanking.Application.Transfers;
 using CoreBanking.Domain.Accounts;
 using CoreBanking.Domain.Customers;
 using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Deposits;
+using CoreBanking.Infrastructure.Pix;
 using CoreBanking.Infrastructure.Transfers;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,6 +19,7 @@ builder.Services.AddDbContext<BankingDbContext>(options =>
 builder.Services.AddScoped<IBankingRepository, BankingRepository>();
 builder.Services.AddScoped<ITransferService, TransferService>();
 builder.Services.AddScoped<IDepositService, DepositService>();
+builder.Services.AddScoped<IPixService, PixService>();
 
 var app = builder.Build();
 
@@ -134,6 +137,57 @@ app.MapGet("/api/v1/deposits/{depositId:guid}", async (Guid depositId, IDepositS
     return deposit is null ? Results.NotFound() : Results.Ok(deposit);
 });
 
+app.MapPost("/api/v1/pix/keys", async (CreatePixKeyRequest request, IPixService pix, CancellationToken cancellationToken) =>
+{
+    if (request.AccountId == Guid.Empty)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["accountId"] = ["Informe uma conta."] });
+    var key = await pix.CreateKeyAsync(request.AccountId, cancellationToken);
+    return key is null ? Results.NotFound(new { message = "Conta não encontrada." }) : Results.Created($"/api/v1/pix/keys/{key}", new PixKeyResult(key.Value, request.AccountId));
+});
+
+app.MapGet("/api/v1/pix/keys/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+{
+    var key = await pix.FindKeyAsync(id, cancellationToken);
+    return key is null ? Results.NotFound() : Results.Ok(key);
+});
+
+app.MapPost("/api/v1/pix/operations", async (PixRequest request, HttpRequest httpRequest, IPixService pix, CancellationToken cancellationToken) =>
+{
+    if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
+        || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["Idempotency-Key"] = ["Informe uma chave única de 1 a 128 caracteres, sem espaços nas extremidades."] });
+    if (request.AccountId == Guid.Empty || request.KeyId == Guid.Empty || !PixRules.IsInstitution(request.InstitutionIspb)
+        || request.Direction is not ("Outgoing" or "Incoming") || request.Scenario is not ("Confirm" or "Reject")
+        || request.AmountMinor <= 0 || request.AmountMinor > PixRules.MaxAmountMinor)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["pix"] = ["Informe conta, chave fictícia, instituição, direção, cenário e valor válidos."] });
+    var response = await pix.CreateAsync(request, keys[0]!, cancellationToken);
+    return response.Outcome switch
+    {
+        PixOutcome.Accepted => Results.Accepted($"/api/v1/pix/operations/{response.Operation!.Id}", response.Operation),
+        PixOutcome.InsufficientFunds => Results.Conflict(response.Operation),
+        PixOutcome.AccountNotFound or PixOutcome.KeyNotFound => Results.NotFound(new { message = "Conta ou chave fictícia não encontrada." }),
+        PixOutcome.Conflict => Results.Conflict(new { message = "A chave de idempotência já foi utilizada com outros dados." }),
+        _ => throw new InvalidOperationException("Resultado Pix desconhecido.")
+    };
+});
+
+app.MapGet("/api/v1/pix/operations/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+{
+    var result = await pix.FindAsync(id, cancellationToken);
+    return result is null ? Results.NotFound() : Results.Ok(result);
+});
+
+app.MapGet("/api/v1/pix/operations/{id:guid}/receipt", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+{
+    var receipt = await pix.FindReceiptAsync(id, cancellationToken);
+    return receipt is null ? Results.NotFound() : Results.Ok(receipt);
+});
+
+app.MapPost("/api/v1/pix/operations/{id:guid}/retry", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+    await pix.RetryAsync(id, cancellationToken)
+        ? Results.Accepted($"/api/v1/pix/operations/{id}")
+        : Results.Conflict(new { message = "Operação inexistente ou fora de revisão." }));
+
 app.Run();
 
 public sealed record CreateCustomerRequest(string? Name);
@@ -141,6 +195,7 @@ public sealed record OpenAccountRequest(Guid CustomerId);
 public sealed record AccountResponse(Guid Id, Guid CustomerId, string Status, DateTimeOffset OpenedAt, long BalanceMinor, string Currency);
 public sealed record CreateTransferRequest(Guid SourceAccountId, Guid DestinationAccountId, long AmountMinor);
 public sealed record CreateDepositRequest(Guid AccountId, long AmountMinor);
+public sealed record CreatePixKeyRequest(Guid AccountId);
 
 public partial class Program
 {

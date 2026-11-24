@@ -3,6 +3,7 @@ using CoreBanking.Domain.Customers;
 using CoreBanking.Domain.Ledger;
 using CoreBanking.Infrastructure.Deposits;
 using CoreBanking.Infrastructure.Messaging;
+using CoreBanking.Infrastructure.Pix;
 using CoreBanking.Infrastructure.Transfers;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,6 +18,9 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
     public DbSet<DepositRecord> Deposits => Set<DepositRecord>();
+    public DbSet<PixKey> PixKeys => Set<PixKey>();
+    public DbSet<PixOperation> PixOperations => Set<PixOperation>();
+    public DbSet<PixTransition> PixTransitions => Set<PixTransition>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -42,6 +46,38 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
             entity.HasIndex(account => account.CustomerAccountId).IsUnique();
             entity.HasOne<Account>().WithOne().HasForeignKey<LedgerAccount>(account => account.CustomerAccountId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<PixKey>(entity =>
+        {
+            entity.HasKey(key => key.Id);
+            entity.HasOne<Account>().WithMany().HasForeignKey(key => key.AccountId).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<PixOperation>(entity =>
+        {
+            entity.HasKey(operation => operation.Id);
+            entity.HasIndex(operation => operation.IdempotencyKey).IsUnique();
+            entity.HasIndex(operation => new { operation.Status, operation.NextAttemptAt });
+            entity.Property(operation => operation.IdempotencyKey).HasMaxLength(128).IsRequired();
+            entity.Property(operation => operation.InstitutionIspb).HasMaxLength(8).IsRequired();
+            entity.Property(operation => operation.Direction).HasMaxLength(8).IsRequired();
+            entity.Property(operation => operation.Scenario).HasMaxLength(8).IsRequired();
+            entity.Property(operation => operation.Status).HasMaxLength(32).IsRequired();
+            entity.HasOne<Account>().WithMany().HasForeignKey(operation => operation.AccountId).OnDelete(DeleteBehavior.Restrict);
+            entity.ToTable("PixOperations", table =>
+            {
+                table.HasCheckConstraint("CK_PixOperations_Amount", "\"AmountMinor\" > 0 AND \"AmountMinor\" <= 99999999999999999");
+                table.HasCheckConstraint("CK_PixOperations_Direction", "\"Direction\" IN ('Outgoing', 'Incoming')");
+                table.HasCheckConstraint("CK_PixOperations_Scenario", "\"Scenario\" IN ('Confirm', 'Reject')");
+                table.HasCheckConstraint("CK_PixOperations_Status", "\"Status\" IN ('Pending', 'Confirmed', 'Rejected', 'RequiresReview', 'InsufficientFunds')");
+                table.HasCheckConstraint("CK_PixOperations_Attempts", "\"Attempts\" BETWEEN 0 AND 3");
+            });
+        });
+        modelBuilder.Entity<PixTransition>(entity =>
+        {
+            entity.HasKey(transition => transition.Id);
+            entity.Property(transition => transition.Status).HasMaxLength(32).IsRequired();
+            entity.HasOne<PixOperation>().WithMany().HasForeignKey(transition => transition.OperationId).OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<TransferRecord>(entity =>

@@ -24,6 +24,7 @@ builder.Services.AddDbContext<BankingDbContext>(options =>
         ?? throw new InvalidOperationException("Configure a conexão ConnectionStrings:Banking.")));
 builder.Services.AddScoped<ITransferEventProcessor, TransferEventProcessor>();
 builder.Services.AddHostedService<Worker>();
+builder.Services.AddHostedService<PixWorker>();
 
 var host = builder.Build();
 host.Run();

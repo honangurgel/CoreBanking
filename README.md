@@ -69,7 +69,7 @@ PostgreSQL        Broker de mensagens
 | Mensageria | RabbitMQ, executado localmente em container |
 | Automação | GitHub Actions |
 
-As versões de dependências são registradas nos arquivos do projeto e devem ser atualizadas conforme compatibilidade e suporte. Clientes, contas, depósitos e transferências internas fictícias têm implementação inicial; a integração Pix simulada ainda será implementada.
+As versões de dependências são registradas nos arquivos do projeto e devem ser atualizadas conforme compatibilidade e suporte. Clientes, contas, depósitos, transferências internas e Pix fictícios têm implementação inicial.
 
 ### Módulos de domínio
 
@@ -214,9 +214,25 @@ dotnet run --project .\src\CoreBanking.Simulator --launch-profile http
 
 Em `http://localhost:5272`, `GET /api/v1/institutions` apresenta um pequeno catálogo estático de nomes e ISPBs públicos. Os dados são referências, não representam conexão com as instituições e não são uma lista atualizada automaticamente. Fonte: [participantes do SPI — Banco Central](https://www.bcb.gov.br/content/estabilidadefinanceira/spi-pdf/participantes-spi-20261120.pdf).
 
-`POST /api/v1/settlements` recebe `operationId` e `keyId` como UUIDs fictícios, `institutionIspb`, `direction` (`Outgoing` ou `Incoming`), `amountMinor`, `scenario` (`Confirm`, `Reject` ou `Unavailable`) e `delayMilliseconds` (0 a 10000). Para a mesma requisição, devolve a mesma decisão fictícia; `Unavailable` retorna HTTP 503. O serviço não guarda solicitações, não registra liquidações, não valida propriedade de chaves e não movimenta saldos. Ele ainda não está integrado à API ou ao worker; não utilizar esta resposta como confirmação financeira.
+`POST /api/v1/settlements` recebe `operationId` e `keyId` como UUIDs fictícios, `institutionIspb`, `direction` (`Outgoing` ou `Incoming`), `amountMinor`, `scenario` (`Confirm`, `Reject` ou `Unavailable`) e `delayMilliseconds` (0 a 10000). Para a mesma requisição, devolve a mesma decisão fictícia; `Unavailable` retorna HTTP 503. O serviço não guarda solicitações, não registra liquidações, não valida propriedade de chaves e não movimenta saldos reais. O worker consome suas respostas somente no fluxo fictício.
 
-Para a futura implementação Pix, o limite escolhido é de R$ 999.999.999.999.999,99 por operação (99.999.999.999.999.999 centavos). Em envio, o saldo ficará reservado enquanto pendente; se as tentativas se esgotarem sem resposta, a reserva permanecerá em revisão manual. Esses comportamentos **ainda não estão implementados**.
+### Pix fictício
+
+O fluxo inicial implementa envio e recebimento **exclusivamente simulados**. O limite é R$ 999.999.999.999.999,99 por operação (99.999.999.999.999.999 centavos). Uma chave local fictícia é um UUID criado por `POST /api/v1/pix/keys`, com `{"accountId":"..."}`. Para recebimento é necessário informar uma chave criada para a conta; no envio, o UUID representa uma chave externa fictícia e não é consultado em nenhum diretório real.
+
+`POST /api/v1/pix/operations` exige `Idempotency-Key` (mesmas regras das transferências) e recebe `accountId`, `keyId`, `institutionIspb`, `direction` (`Outgoing` ou `Incoming`), `amountMinor` e `scenario` (`Confirm` ou `Reject`). Retorna `202` para operação aceita e o estado atual também nos replays; requisições com a mesma chave e dados diferentes retornam `409`. Saldo insuficiente é persistido e exige nova chave para tentar novamente. `GET /api/v1/pix/operations/{id}` consulta o estado; `GET /api/v1/pix/operations/{id}/receipt` traz os lançamentos e a trilha de estados, inclusive para operações não confirmadas.
+
+No envio, o lançamento de reserva reduz o saldo disponível da conta imediatamente e credita uma conta contábil interna; confirmação transfere a reserva para compensação fictícia, enquanto rejeição devolve o valor à conta. No recebimento, o crédito só ocorre após confirmação. Cada mudança de estado e lançamento é persistida atomicamente. O próprio registro `Pending` funciona como fila durável no PostgreSQL, independente da Outbox de transferências internas; workers usam bloqueios `SKIP LOCKED` para evitar processamento simultâneo. A chamada ao simulador é determinística para a mesma operação e pode ser repetida após interrupção.
+
+Configure o endereço **local** antes de iniciar o worker:
+
+```powershell
+$env:Pix__SimulatorUrl = "http://localhost:5272"
+```
+
+O worker aceita somente origem HTTP loopback e não segue redirecionamentos. Sem configuração, o processamento Pix fica desativado e as operações permanecem pendentes. Falhas temporárias do simulador são tentadas três vezes, com atrasos de 1 e 2 segundos. Após três falhas, ou resposta inválida, a operação passa a `RequiresReview` e a reserva permanece intacta. Depois de investigar e corrigir a causa, `POST /api/v1/pix/operations/{id}/retry` reinicia as tentativas mantendo os dados e o cenário originais; nunca libere a reserva manualmente por suposição. Uma indisponibilidade do PostgreSQL é tentada novamente pelo worker. As filas e as políticas Pix não usam a fila RabbitMQ de falhas de transferências.
+
+O simulador não persiste suas respostas nem representa BACEN, DICT ou liquidação real. Nesta demonstração a decisão é escolhida na requisição, sem autenticação, apenas para testes locais; não use o sistema para movimentação real.
 
 O endpoint `GET /health` verifica apenas se a API está em execução, não a disponibilidade do banco ou do broker.
 
@@ -286,7 +302,7 @@ A organização poderá evoluir durante a implementação, preservando os limite
 
 ## Status
 
-**Implementação inicial.** Clientes, contas, ledger, depósitos e transferências internas fictícias, Outbox/Inbox e worker de eventos estão em desenvolvimento. A integração Pix simulada ainda não está implementada. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
+**Implementação inicial.** Clientes, contas, ledger, depósitos, transferências e Pix fictícios estão em desenvolvimento. O simulador não é uma integração real ou homologada. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
 
 ## Referências
 

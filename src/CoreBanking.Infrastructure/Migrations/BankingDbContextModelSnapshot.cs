@@ -164,6 +164,126 @@ namespace CoreBanking.Infrastructure.Migrations
                     b.ToTable("OutboxMessages");
                 });
 
+            modelBuilder.Entity("CoreBanking.Infrastructure.Pix.PixKey", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId");
+
+                    b.ToTable("PixKeys");
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Pix.PixOperation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AmountMinor")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Direction")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("InstitutionIspb")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<Guid>("KeyId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("ReservationEntryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Scenario")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<Guid?>("SettlementEntryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "NextAttemptAt");
+
+                    b.ToTable("PixOperations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_PixOperations_Amount", "\"AmountMinor\" > 0 AND \"AmountMinor\" <= 99999999999999999");
+
+                            t.HasCheckConstraint("CK_PixOperations_Attempts", "\"Attempts\" BETWEEN 0 AND 3");
+
+                            t.HasCheckConstraint("CK_PixOperations_Direction", "\"Direction\" IN ('Outgoing', 'Incoming')");
+
+                            t.HasCheckConstraint("CK_PixOperations_Scenario", "\"Scenario\" IN ('Confirm', 'Reject')");
+
+                            t.HasCheckConstraint("CK_PixOperations_Status", "\"Status\" IN ('Pending', 'Confirmed', 'Rejected', 'RequiresReview', 'InsufficientFunds')");
+                        });
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Pix.PixTransition", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId");
+
+                    b.ToTable("PixTransitions");
+                });
+
             modelBuilder.Entity("CoreBanking.Infrastructure.Transfers.TransferRecord", b =>
                 {
                     b.Property<Guid>("Id")
@@ -241,6 +361,33 @@ namespace CoreBanking.Infrastructure.Migrations
                     b.HasOne("CoreBanking.Infrastructure.Transfers.TransferRecord", null)
                         .WithMany()
                         .HasForeignKey("TransferId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Pix.PixKey", b =>
+                {
+                    b.HasOne("CoreBanking.Domain.Accounts.Account", null)
+                        .WithMany()
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Pix.PixOperation", b =>
+                {
+                    b.HasOne("CoreBanking.Domain.Accounts.Account", null)
+                        .WithMany()
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Pix.PixTransition", b =>
+                {
+                    b.HasOne("CoreBanking.Infrastructure.Pix.PixOperation", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
