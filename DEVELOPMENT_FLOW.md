@@ -80,7 +80,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** aceitar operações assíncronas com entrega confiável entre banco e mensageria.
 
-**Status:** Outbox e Inbox para eventos de transferência e worker RabbitMQ foram introduzidos; processamento de operações externas, política de falhas completa e reprocessamento permanecem pendentes.
+**Status:** Outbox, Inbox e worker de transferência incluem retries limitados por sequência de entrega e reprocessamento manual da primeira mensagem da fila de falhas. O processamento de operações externas e a validação de falhas e recuperação permanecem pendentes; duplicatas podem gerar mais tentativas totais que o limite por sequência.
 
 - Gravar evento de Outbox na mesma transação do estado de negócio que o origina.
 - Publicar eventos pendentes no RabbitMQ por meio de um dispatcher recuperável.

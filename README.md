@@ -122,7 +122,9 @@ Uma conta contábil de saldo zero é criada na mesma transação da conta de cli
 
 Depósitos e transferências exigem o cabeçalho `Idempotency-Key` (até 128 caracteres, sem espaços nas extremidades). A chave é única por tipo de operação e é mantida sem expiração. Repetir dados idênticos retorna o mesmo resultado; repetir a chave com dados diferentes retorna `409`. Uma transferência rejeitada por saldo insuficiente mantém sua rejeição: uma nova tentativa exige outra chave. Contas inexistentes e entradas inválidas não reservam a chave.
 
-Uma transferência concluída grava o evento na Outbox junto com o lançamento e a operação. O worker publica eventos persistentes com confirmação no RabbitMQ; um consumidor registra a Inbox antes de confirmar a mensagem, deduplicando entregas. Mensagens inválidas vão para `corebanking.transfers.failed`. Em falhas de infraestrutura, o worker registra o erro e tenta reconectar com atraso progressivo; ainda não há ferramenta de reprocessamento nem limite de tentativas. Isso não representa comunicação ou liquidação com o BACEN.
+Uma transferência concluída grava o evento na Outbox junto com o lançamento e a operação. O worker publica eventos persistentes com confirmação no RabbitMQ; um consumidor registra a Inbox antes de confirmar a mensagem, deduplicando entregas. Falhas de processamento explicitamente sinalizadas recebem até três tentativas por sequência de entrega, com atrasos de 1 e 2 segundos em filas quorum; após a terceira falha, a mensagem vai para `corebanking.transfers.failed`. Mensagens inválidas também vão diretamente para essa fila. Em falhas de infraestrutura, o worker registra o erro e tenta reconectar com atraso progressivo, sem consumir o limite de falhas de processamento.
+
+Como a entrega é pelo menos uma vez, uma interrupção entre a publicação e a confirmação pode gerar cópias e mais tentativas totais do que o limite por sequência. Erros inesperados interrompem o worker, em vez de serem tratados silenciosamente. O consumidor atual apenas registra a Inbox: futuros efeitos de negócio deverão ser gravados atomicamente com ela. Isso não representa comunicação ou liquidação com o BACEN.
 
 ## Escala e metas de carga
 
@@ -193,6 +195,14 @@ $env:ConnectionStrings__Banking = "Host=localhost;Port=5432;Database=corebanking
 $env:RabbitMQ__ConnectionString = "amqp://corebanking:corebanking_local@localhost:5672/"
 dotnet run --project .\src\CoreBanking.Worker
 ```
+
+Para inspecionar falhas, use o painel local do RabbitMQ e consulte logs e conteúdo antes de agir. Após corrigir a causa, execute o comando abaixo em outro terminal com `RabbitMQ__ConnectionString` configurada. Ele reenvia **uma mensagem do início** da fila de falhas e reinicia seu contador; não seleciona um ID específico nem altera o conteúdo. Mensagens inválidas retornarão à fila até serem corrigidas por procedimento apropriado. Repita apenas após verificar o resultado.
+
+```powershell
+dotnet run --project .\src\CoreBanking.Worker -- --reprocess-failed
+```
+
+Uma interrupção durante o reenvio pode produzir duplicatas; a Inbox evita registros duplicados. Não altere manualmente o ledger para reprocessar eventos.
 
 O endpoint `GET /health` verifica apenas se a API está em execução, não a disponibilidade do banco ou do broker.
 

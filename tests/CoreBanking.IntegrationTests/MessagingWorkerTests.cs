@@ -57,6 +57,7 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
 
         var services = new ServiceCollection()
             .AddDbContext<BankingDbContext>(options => options.UseNpgsql(postgres.GetConnectionString()))
+            .AddScoped<CoreBanking.Worker.ITransferEventProcessor, CoreBanking.Worker.TransferEventProcessor>()
             .BuildServiceProvider();
         using var loggerFactory = LoggerFactory.Create(_ => { });
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -95,6 +96,99 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             await worker.StopAsync(CancellationToken.None);
             worker.Dispose();
             await services.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task ProcessingFailures_AreRetriedAndCanBeReprocessed(int failures)
+    {
+        var transferId = Guid.NewGuid();
+        var messageId = Guid.NewGuid();
+        await using (var db = CreateContext())
+        {
+            db.Transfers.Add(new TransferRecord
+            {
+                Id = transferId,
+                IdempotencyKey = "retry-test",
+                SourceAccountId = Guid.NewGuid(),
+                DestinationAccountId = Guid.NewGuid(),
+                AmountMinor = 1,
+                Status = "Completed",
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            db.OutboxMessages.Add(new OutboxMessage { Id = messageId, TransferId = transferId, CreatedAt = DateTimeOffset.UtcNow });
+            await db.SaveChangesAsync();
+        }
+
+        var processor = new FailingProcessor(failures, postgres.GetConnectionString());
+        var services = new ServiceCollection()
+            .AddDbContext<BankingDbContext>(options => options.UseNpgsql(postgres.GetConnectionString()))
+            .AddSingleton<CoreBanking.Worker.ITransferEventProcessor>(processor)
+            .BuildServiceProvider();
+        using var loggerFactory = LoggerFactory.Create(_ => { });
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["RabbitMQ:ConnectionString"] = rabbit.GetConnectionString()
+        }).Build();
+        var worker = new CoreBanking.Worker.Worker(services.GetRequiredService<IServiceScopeFactory>(), config,
+            loggerFactory.CreateLogger<CoreBanking.Worker.Worker>());
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            var factory = new ConnectionFactory { Uri = new Uri(rabbit.GetConnectionString()) };
+            await using var connection = await factory.CreateConnectionAsync();
+            await using var channel = await connection.CreateChannelAsync(
+                new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true));
+            await CoreBanking.Worker.TransferQueues.DeclareAsync(channel, CancellationToken.None);
+
+            if (failures == 3)
+            {
+                await WaitForAsync(async () =>
+                    (await channel.QueueDeclarePassiveAsync(CoreBanking.Worker.TransferQueues.Failed)).MessageCount == 1, worker);
+                Assert.Equal(3, processor.Attempts);
+                await using (var before = CreateContext())
+                {
+                    Assert.False(await before.InboxMessages.AnyAsync(item => item.Id == messageId));
+                }
+                Assert.True(await CoreBanking.Worker.TransferQueues.ReprocessNextAsync(channel, CancellationToken.None));
+            }
+
+            await WaitForAsync(async () =>
+            {
+                await using var db = CreateContext();
+                return await db.InboxMessages.AnyAsync(item => item.Id == messageId);
+            }, worker);
+            Assert.Equal(failures + 1, processor.Attempts);
+            await using var verification = CreateContext();
+            Assert.Equal(1, await verification.InboxMessages.CountAsync(item => item.Id == messageId));
+            Assert.Equal(0u, (await channel.QueueDeclarePassiveAsync(CoreBanking.Worker.TransferQueues.Failed)).MessageCount);
+            Assert.False(await CoreBanking.Worker.TransferQueues.ReprocessNextAsync(channel, CancellationToken.None));
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+            await services.DisposeAsync();
+        }
+    }
+
+    private sealed class FailingProcessor(int failures, string connectionString) : CoreBanking.Worker.ITransferEventProcessor
+    {
+        private int attempts;
+        public int Attempts => Volatile.Read(ref attempts);
+
+        public async Task ProcessAsync(Guid messageId, Guid transferId, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref attempts) <= failures)
+            {
+                throw new CoreBanking.Worker.MessageProcessingException("Falha simulada.");
+            }
+
+            await using var db = new BankingDbContext(
+                new DbContextOptionsBuilder<BankingDbContext>().UseNpgsql(connectionString).Options);
+            await new CoreBanking.Worker.TransferEventProcessor(db).ProcessAsync(messageId, transferId, cancellationToken);
         }
     }
 

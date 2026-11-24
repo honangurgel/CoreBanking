@@ -10,9 +10,6 @@ namespace CoreBanking.Worker;
 
 public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration configuration, ILogger<Worker> logger) : BackgroundService
 {
-    private const string QueueName = "corebanking.transfers.completed";
-    private const string DeadLetterQueueName = "corebanking.transfers.failed";
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var uri = configuration["RabbitMQ:ConnectionString"]
@@ -40,13 +37,7 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
         await using var connection = await factory.CreateConnectionAsync(stoppingToken);
         await using var channel = await connection.CreateChannelAsync(
             new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true), stoppingToken);
-        await channel.QueueDeclareAsync(DeadLetterQueueName, durable: true, exclusive: false, autoDelete: false, cancellationToken: stoppingToken);
-        await channel.QueueDeclareAsync(QueueName, durable: true, exclusive: false, autoDelete: false,
-            arguments: new Dictionary<string, object?>
-            {
-                ["x-dead-letter-exchange"] = "",
-                ["x-dead-letter-routing-key"] = DeadLetterQueueName
-            }, cancellationToken: stoppingToken);
+        await TransferQueues.DeclareAsync(channel, stoppingToken);
 
         logger.LogInformation("Worker de eventos iniciado.");
         while (!stoppingToken.IsCancellationRequested)
@@ -79,7 +70,7 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
 
         var body = JsonSerializer.SerializeToUtf8Bytes(new TransferCompleted(message.Id, message.TransferId));
         var properties = new BasicProperties { Persistent = true, MessageId = message.Id.ToString(), ContentType = "application/json" };
-        await channel.BasicPublishAsync("", QueueName, mandatory: true, basicProperties: properties, body: body, cancellationToken: cancellationToken);
+        await channel.BasicPublishAsync("", TransferQueues.Main, mandatory: true, basicProperties: properties, body: body, cancellationToken: cancellationToken);
         message.PublishedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
@@ -88,7 +79,7 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
 
     private async Task<bool> ConsumeNextAsync(IChannel channel, CancellationToken cancellationToken)
     {
-        var delivery = await channel.BasicGetAsync(QueueName, autoAck: false, cancellationToken);
+        var delivery = await channel.BasicGetAsync(TransferQueues.Main, autoAck: false, cancellationToken);
         if (delivery is null)
         {
             return false;
@@ -101,15 +92,15 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
         }
         catch (JsonException exception)
         {
-            logger.LogError(exception, "Mensagem inválida enviada para a fila de falhas.");
-            await channel.BasicRejectAsync(delivery.DeliveryTag, requeue: false, cancellationToken);
+            logger.LogError(exception, "Encaminhando mensagem inválida para a fila de falhas.");
+            await MoveInvalidAsync(channel, delivery, cancellationToken);
             return true;
         }
 
         if (message is null || message.MessageId == Guid.Empty || message.TransferId == Guid.Empty)
         {
-            logger.LogError("Mensagem sem identificadores válidos enviada para a fila de falhas.");
-            await channel.BasicRejectAsync(delivery.DeliveryTag, requeue: false, cancellationToken);
+            logger.LogError("Encaminhando mensagem sem identificadores válidos para a fila de falhas.");
+            await MoveInvalidAsync(channel, delivery, cancellationToken);
             return true;
         }
 
@@ -119,18 +110,68 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
             item => item.Id == message.MessageId && item.TransferId == message.TransferId, cancellationToken);
         if (!known)
         {
-            logger.LogError("Mensagem {MessageId} não corresponde à Outbox e foi enviada para a fila de falhas.", message.MessageId);
-            await channel.BasicRejectAsync(delivery.DeliveryTag, requeue: false, cancellationToken);
+            logger.LogError("Mensagem {MessageId} não corresponde à Outbox; encaminhando para a fila de falhas.", message.MessageId);
+            await MoveInvalidAsync(channel, delivery, cancellationToken);
             return true;
         }
 
-        await db.Database.ExecuteSqlInterpolatedAsync($"""
-            INSERT INTO "InboxMessages" ("Id", "TransferId", "ReceivedAt")
-            VALUES ({message.MessageId}, {message.TransferId}, {DateTimeOffset.UtcNow})
-            ON CONFLICT ("Id") DO NOTHING
-            """, cancellationToken);
+        var attempt = 1;
+        if (delivery.BasicProperties.Headers is not null
+            && delivery.BasicProperties.Headers.TryGetValue(TransferQueues.AttemptHeader, out var value))
+        {
+            if (value is not int count || count is < 2 or > 3)
+            {
+                logger.LogError("Mensagem {MessageId} possui contador de tentativas inválido.", message.MessageId);
+                await MoveInvalidAsync(channel, delivery, cancellationToken);
+                return true;
+            }
+            attempt = count;
+        }
+
+        if (!await db.InboxMessages.AsNoTracking().AnyAsync(item => item.Id == message.MessageId, cancellationToken))
+        {
+            try
+            {
+                var processor = scope.ServiceProvider.GetRequiredService<ITransferEventProcessor>();
+                await processor.ProcessAsync(message.MessageId, message.TransferId, cancellationToken);
+            }
+            catch (MessageProcessingException exception)
+            {
+                var destination = attempt switch
+                {
+                    1 => TransferQueues.FirstRetry,
+                    2 => TransferQueues.SecondRetry,
+                    _ => TransferQueues.Failed
+                };
+                logger.LogError(exception, "Falha ao processar mensagem {MessageId}, tentativa {Attempt}; destino {Destination}.",
+                    message.MessageId, attempt, destination);
+                var properties = new BasicProperties
+                {
+                    Persistent = true,
+                    MessageId = message.MessageId.ToString(),
+                    ContentType = "application/json",
+                    Headers = new Dictionary<string, object?> { [TransferQueues.AttemptHeader] = attempt + 1 }
+                };
+                await channel.BasicPublishAsync("", destination, mandatory: true, basicProperties: properties,
+                    body: delivery.Body, cancellationToken: cancellationToken);
+            }
+        }
         await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
         return true;
+    }
+
+    private static async Task MoveInvalidAsync(IChannel channel, BasicGetResult delivery, CancellationToken cancellationToken)
+    {
+        var properties = new BasicProperties
+        {
+            Persistent = true,
+            MessageId = delivery.BasicProperties.MessageId,
+            ContentType = delivery.BasicProperties.ContentType,
+            Headers = delivery.BasicProperties.Headers
+        };
+        await channel.BasicPublishAsync("", TransferQueues.Failed, mandatory: true, basicProperties: properties,
+            body: delivery.Body, cancellationToken: cancellationToken);
+        await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
     }
 
     private sealed record TransferCompleted(Guid MessageId, Guid TransferId);
