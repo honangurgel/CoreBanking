@@ -94,7 +94,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** emular o serviço externo sem acessar sistemas reais.
 
-**Status:** serviço independente com catálogo estático e respostas fictícias; worker Pix integrado por HTTP local, com estados persistidos. Limites de taxa e concorrência compartilhados para o simulador ainda não foram implementados.
+**Status:** serviço independente com catálogo estático e respostas fictícias; worker Pix integrado por HTTP local, com estados persistidos e limites compartilhados no PostgreSQL. Os limites são configurações de desenvolvimento e não representam capacidade medida.
 
 - Criar um serviço local com contratos fictícios para consulta, comunicação, liquidação e reporte.
 - Usar nomes e códigos públicos de instituições reais apenas como referência; clientes, contas, chaves e liquidações serão fictícios, sem comunicação com instituições reais.
@@ -109,7 +109,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** ampliar pagamentos usando o fluxo assíncrono e os invariantes já estabelecidos.
 
-**Status:** envio e recebimento fictícios, limite de R$ 999.999.999.999.999,99 (99.999.999.999.999.999 centavos), reserva contábil e revisão manual foram introduzidos. O processamento é persistido no PostgreSQL e o simulador é determinístico e sem estado. Controle compartilhado de taxa, testes de carga e validação operacional ampliada permanecem pendentes.
+**Status:** envio e recebimento fictícios, limite de R$ 999.999.999.999.999,99 (99.999.999.999.999.999 centavos), reserva contábil, revisão manual e controle compartilhado das chamadas do worker foram introduzidos. O processamento é persistido no PostgreSQL e o simulador é determinístico e sem estado. Rate limiting da API, testes de carga e validação operacional ampliada permanecem pendentes.
 
 - Criar chaves fictícias e regras de transferência Pix exclusivamente internas ao simulador.
 - Implementar validação, limites por operação e estado pendente até confirmação necessária.

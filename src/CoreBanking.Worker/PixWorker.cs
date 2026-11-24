@@ -62,6 +62,8 @@ public sealed class PixWorker(IServiceScopeFactory scopeFactory, IConfiguration 
             LIMIT 1 FOR UPDATE SKIP LOCKED
             """).SingleOrDefaultAsync(cancellationToken);
         if (operation is null) return false;
+        if (!await PixThrottle.TryAcquireAsync(db, scopeFactory, cancellationToken))
+            return false;
 
         SimulatedResult? result = null;
         var requiresReview = false;

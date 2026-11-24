@@ -223,6 +223,8 @@ public sealed class PixTests : IAsyncLifetime
             services.GetRequiredService<IServiceScopeFactory>(), interrupted, NullLogger.Instance, cancellation.Token));
         Assert.Equal("Pending", (await client.GetFromJsonAsync<PixResult>($"/api/v1/pix/operations/{operation.Id}"))!.Status);
         Assert.Equal(600, await BalanceAsync(client, account));
+        await using (var db = CreateContext())
+            Assert.Equal(1, await db.Database.SqlQueryRaw<int>("""SELECT count(*)::integer AS "Value" FROM "PixThrottleCalls" """).SingleAsync());
         Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
         Assert.False(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
         var receipt = (await client.GetFromJsonAsync<PixReceipt>($"/api/v1/pix/operations/{operation.Id}/receipt"))!;
@@ -245,6 +247,93 @@ public sealed class PixTests : IAsyncLifetime
         Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), invalid, NullLogger.Instance, CancellationToken.None));
         Assert.Equal("RequiresReview", (await client.GetFromJsonAsync<PixResult>($"/api/v1/pix/operations/{operation.Id}"))!.Status);
         Assert.Equal(60, await BalanceAsync(client, account));
+    }
+
+    [Fact]
+    public async Task SharedRateLimit_DefersOperationsWithoutConsumingAttempts()
+    {
+        using var api = CreateApi();
+        using var client = api.CreateClient();
+        using var simulator = new WebApplicationFactory<SimulatorAssemblyMarker>();
+        using var simulatorClient = simulator.CreateClient();
+        await using var services = CreateServices();
+        var account = await AccountAsync(client);
+        using var keyResponse = await client.PostAsJsonAsync("/api/v1/pix/keys", new { accountId = account });
+        var key = (await keyResponse.Content.ReadFromJsonAsync<IdResponse>())!.Id;
+        var request = new PixRequest(account, key, "00000000", "Incoming", 10, "Confirm");
+        using var first = await SubmitAsync(client, request, "rate-first");
+        using var second = await SubmitAsync(client, request, "rate-second");
+        await using (var db = CreateContext())
+            await db.Database.ExecuteSqlRawAsync("""
+                INSERT INTO "PixThrottleCalls" ("StartedAt")
+                SELECT clock_timestamp() FROM generate_series(1, 599)
+                """);
+
+        var calls = await Task.WhenAll(
+            PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None),
+            PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
+        Assert.Single(calls, processed => processed);
+        await using (var db = CreateContext())
+        {
+            var pending = await db.PixOperations.AsNoTracking().SingleAsync(item => item.Status == "Pending");
+            Assert.Equal(0, pending.Attempts);
+            Assert.Equal(1, await db.PixOperations.CountAsync(item => item.Status == "Confirmed"));
+            Assert.Equal(600, await db.Database.SqlQueryRaw<int>("""SELECT count(*)::integer AS "Value" FROM "PixThrottleCalls" """).SingleAsync());
+            await db.Database.ExecuteSqlRawAsync("""UPDATE "PixThrottleCalls" SET "StartedAt" = clock_timestamp() - interval '61 seconds'""");
+        }
+        Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
+        Assert.Equal(20, await BalanceAsync(client, account));
+    }
+
+    [Fact]
+    public async Task SharedConcurrencyLimit_DefersOtherWorkersUntilCallFinishes()
+    {
+        using var api = CreateApi();
+        using var client = api.CreateClient();
+        using var simulator = new WebApplicationFactory<SimulatorAssemblyMarker>();
+        using var simulatorClient = simulator.CreateClient();
+        var handler = new BlockingHandler(simulatorClient);
+        using var blocking = new HttpClient(handler) { BaseAddress = new Uri("http://localhost/") };
+        await using var services = CreateServices();
+        var account = await AccountAsync(client);
+        using var keyResponse = await client.PostAsJsonAsync("/api/v1/pix/keys", new { accountId = account });
+        var key = (await keyResponse.Content.ReadFromJsonAsync<IdResponse>())!.Id;
+        var request = new PixRequest(account, key, "00000000", "Incoming", 10, "Confirm");
+        using var first = await SubmitAsync(client, request, "concurrent-first");
+        using var second = await SubmitAsync(client, request, "concurrent-second");
+        await using (var db = CreateContext())
+            await db.Database.ExecuteSqlRawAsync("""UPDATE "PixThrottleSettings" SET "MaxConcurrent" = 1""");
+        var processing = PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), blocking, NullLogger.Instance, CancellationToken.None);
+        try
+        {
+            await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.False(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
+        }
+        finally
+        {
+            handler.Release.TrySetResult();
+            await processing;
+        }
+        Assert.True(await processing);
+        Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
+        Assert.Equal(20, await BalanceAsync(client, account));
+    }
+
+    private sealed class BlockingHandler(HttpClient simulator) : HttpMessageHandler
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            using var copy = new HttpRequestMessage(request.Method, request.RequestUri)
+            {
+                Content = new ByteArrayContent(await request.Content!.ReadAsByteArrayAsync(cancellationToken))
+            };
+            copy.Content.Headers.ContentType = request.Content.Headers.ContentType;
+            return await simulator.SendAsync(copy, cancellationToken);
+        }
     }
 
     private sealed class InterruptAfterReplyHandler(HttpClient simulator, CancellationTokenSource cancellation) : HttpMessageHandler
