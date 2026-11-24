@@ -179,6 +179,9 @@ dotnet build
 # Credenciais exclusivamente locais do Compose; substitua se configurou outras.
 $env:ConnectionStrings__Banking = "Host=localhost;Port=5432;Database=corebanking;Username=corebanking;Password=corebanking_local"
 dotnet ef database update --project .\src\CoreBanking.Infrastructure --startup-project .\src\CoreBanking.Infrastructure
+# Necessários para o health check de prontidão da API.
+$env:RabbitMQ__ConnectionString = "amqp://corebanking:corebanking_local@localhost:5672/"
+$env:Pix__SimulatorUrl = "http://localhost:5272"
 dotnet run --project .\src\CoreBanking.Api
 ```
 
@@ -238,7 +241,9 @@ Os limites são valores de desenvolvimento, não uma capacidade medida. Para alt
 
 O simulador não persiste suas respostas nem representa BACEN, DICT ou liquidação real. Nesta demonstração a decisão é escolhida na requisição, sem autenticação, apenas para testes locais; não use o sistema para movimentação real.
 
-O endpoint `GET /health` verifica apenas se a API está em execução, não a disponibilidade do banco ou do broker.
+`GET /health` verifica apenas se a API está em execução. `GET /health/ready` verifica conexão e consulta ao PostgreSQL, conexão autenticada ao RabbitMQ e resposta de saúde do simulador local. Configure as três variáveis no processo da API e inicie o simulador; a ausência ou indisponibilidade de qualquer dependência resulta em HTTP 503 e estado `Unhealthy`, incluindo quando o Pix está desativado no worker. O resultado contém apenas o estado geral e os estados `postgres`, `rabbitmq` e `simulator`, sem detalhes de conexão. A verificação não confirma migrations, filas, funcionamento dos workers ou capacidade de processamento. Cada consulta abre uma conexão ao broker: use frequência moderada e não exponha a API publicamente.
+
+A API limita requisições por IP em janela fixa de um minuto, por instância, com padrão de 600 e resposta HTTP 429 sem fila. O valor pode ser alterado por `RateLimiting__PermitsPerMinute`; as rotas sob `/health` são isentas. Sem configuração confiável de proxy, o endereço observado pode ser compartilhado por vários clientes; não é um limite distribuído nem uma proteção de segurança.
 
 ### Primeiro fluxo de uso
 
@@ -266,6 +271,7 @@ O script cria novos clientes e contas a cada execução, usa nomes aleatórios e
 | Método | Endpoint | Finalidade |
 | --- | --- | --- |
 | `GET` | `/health` | Verificar se a API está em execução |
+| `GET` | `/health/ready` | Verificar conectividade das dependências |
 | `POST` | `/api/v1/customers` | Cadastrar cliente fictício |
 | `GET` | `/api/v1/customers/{customerId}` | Consultar cliente |
 | `POST` | `/api/v1/accounts` | Abrir conta |

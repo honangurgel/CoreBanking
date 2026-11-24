@@ -8,6 +8,8 @@ using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Deposits;
 using CoreBanking.Infrastructure.Pix;
 using CoreBanking.Infrastructure.Transfers;
+using CoreBanking.Api;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Threading.RateLimiting;
@@ -22,6 +24,12 @@ builder.Services.AddScoped<IBankingRepository, BankingRepository>();
 builder.Services.AddScoped<ITransferService, TransferService>();
 builder.Services.AddScoped<IDepositService, DepositService>();
 builder.Services.AddScoped<IPixService, PixService>();
+builder.Services.AddHealthChecks()
+    .AddCheck<PostgresHealthCheck>("postgres", timeout: TimeSpan.FromSeconds(10))
+    .AddCheck<RabbitMqHealthCheck>("rabbitmq", timeout: TimeSpan.FromSeconds(10))
+    .AddCheck<SimulatorHealthCheck>("simulator", timeout: TimeSpan.FromSeconds(10));
+builder.Services.AddHttpClient<SimulatorHealthCheck>(client => client.Timeout = TimeSpan.FromSeconds(5))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false });
 
 var permitsPerMinute = builder.Configuration.GetValue<int?>("RateLimiting:PermitsPerMinute") ?? 600;
 if (permitsPerMinute < 1)
@@ -56,6 +64,18 @@ if (app.Environment.IsDevelopment())
 
 app.MapGet("/health", () => TypedResults.Ok(new { status = "Healthy" }))
     .WithName("Health");
+
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        await context.Response.WriteAsJsonAsync(new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.ToDictionary(entry => entry.Key, entry => entry.Value.Status.ToString())
+        });
+    }
+});
 
 app.MapPost("/api/v1/customers", async (CreateCustomerRequest request, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
