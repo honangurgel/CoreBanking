@@ -1,7 +1,7 @@
-using System.Text;
-using System.Text.Json;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Messaging;
 using CoreBanking.Infrastructure.Transfers;
@@ -25,6 +25,67 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
         await Task.WhenAll(postgres.StartAsync(), rabbit.StartAsync());
         await using var db = CreateContext();
         await db.Database.MigrateAsync();
+    }
+
+    [Fact]
+    public async Task BrokerOutage_PreservesOutboxAndWorkerRecovers()
+    {
+        var services = new ServiceCollection()
+            .AddDbContext<BankingDbContext>(options => options.UseNpgsql(postgres.GetConnectionString()))
+            .AddScoped<CoreBanking.Worker.ITransferEventProcessor, CoreBanking.Worker.TransferEventProcessor>()
+            .BuildServiceProvider();
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["RabbitMQ:ConnectionString"] = rabbit.GetConnectionString()
+        }).Build();
+        var logger = new RecordingLogger();
+        var worker = new CoreBanking.Worker.Worker(services.GetRequiredService<IServiceScopeFactory>(), config, logger);
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await WaitForAsync(() => Task.FromResult(logger.Messages.Any(message => message.Contains("Worker de eventos iniciado."))), worker);
+            var stopped = await rabbit.ExecAsync(["rabbitmqctl", "stop_app"]);
+            Assert.True(stopped.ExitCode == 0, $"Falha ao parar RabbitMQ: {stopped.Stderr}");
+            await WaitForAsync(() => Task.FromResult(logger.Messages.Any(message => message.Contains("Falha temporária no worker"))), worker);
+
+            var transferId = Guid.NewGuid();
+            var messageId = Guid.NewGuid();
+            await using (var db = CreateContext())
+            {
+                db.Transfers.Add(new TransferRecord
+                {
+                    Id = transferId,
+                    IdempotencyKey = "outage-test",
+                    SourceAccountId = Guid.NewGuid(),
+                    DestinationAccountId = Guid.NewGuid(),
+                    AmountMinor = 1,
+                    Status = "Completed",
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+                db.OutboxMessages.Add(new OutboxMessage { Id = messageId, TransferId = transferId, CreatedAt = DateTimeOffset.UtcNow });
+                await db.SaveChangesAsync();
+            }
+            await using (var db = CreateContext())
+            {
+                Assert.Null((await db.OutboxMessages.SingleAsync(item => item.Id == messageId)).PublishedAt);
+                Assert.False(await db.InboxMessages.AnyAsync(item => item.Id == messageId));
+            }
+
+            var started = await rabbit.ExecAsync(["rabbitmqctl", "start_app"]);
+            Assert.True(started.ExitCode == 0, $"Falha ao iniciar RabbitMQ: {started.Stderr}");
+            await WaitForAsync(async () =>
+            {
+                await using var db = CreateContext();
+                return await db.InboxMessages.CountAsync(item => item.Id == messageId) == 1
+                    && await db.OutboxMessages.AnyAsync(item => item.Id == messageId && item.PublishedAt != null);
+            }, worker);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+            await services.DisposeAsync();
+        }
     }
 
     public async Task DisposeAsync()
@@ -210,6 +271,15 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
                 new DbContextOptionsBuilder<BankingDbContext>().UseNpgsql(connectionString).Options);
             await new CoreBanking.Worker.TransferEventProcessor(db).ProcessAsync(messageId, transferId, cancellationToken);
         }
+    }
+
+    private sealed class RecordingLogger : ILogger<CoreBanking.Worker.Worker>
+    {
+        public ConcurrentQueue<string> Messages { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Messages.Enqueue(formatter(state, exception));
     }
 
     private static async Task WaitForAsync(Func<Task<bool>> condition, CoreBanking.Worker.Worker worker)
