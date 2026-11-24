@@ -204,6 +204,20 @@ dotnet run --project .\src\CoreBanking.Worker -- --reprocess-failed
 
 Uma interrupção durante o reenvio pode produzir duplicatas; a Inbox evita registros duplicados. Não altere manualmente o ledger para reprocessar eventos.
 
+### Simulador de liquidação
+
+O projeto `CoreBanking.Simulator` fornece um contrato **fictício e independente** para desenvolver a integração. Execute-o localmente:
+
+```powershell
+dotnet run --project .\src\CoreBanking.Simulator --launch-profile http
+```
+
+Em `http://localhost:5272`, `GET /api/v1/institutions` apresenta um pequeno catálogo estático de nomes e ISPBs públicos. Os dados são referências, não representam conexão com as instituições e não são uma lista atualizada automaticamente. Fonte: [participantes do SPI — Banco Central](https://www.bcb.gov.br/content/estabilidadefinanceira/spi-pdf/participantes-spi-20261120.pdf).
+
+`POST /api/v1/settlements` recebe `operationId` e `keyId` como UUIDs fictícios, `institutionIspb`, `direction` (`Outgoing` ou `Incoming`), `amountMinor`, `scenario` (`Confirm`, `Reject` ou `Unavailable`) e `delayMilliseconds` (0 a 10000). Para a mesma requisição, devolve a mesma decisão fictícia; `Unavailable` retorna HTTP 503. O serviço não guarda solicitações, não registra liquidações, não valida propriedade de chaves e não movimenta saldos. Ele ainda não está integrado à API ou ao worker; não utilizar esta resposta como confirmação financeira.
+
+Para a futura implementação Pix, o limite escolhido é de R$ 999.999.999.999.999,99 por operação (99.999.999.999.999.999 centavos). Em envio, o saldo ficará reservado enquanto pendente; se as tentativas se esgotarem sem resposta, a reserva permanecerá em revisão manual. Esses comportamentos **ainda não estão implementados**.
+
 O endpoint `GET /health` verifica apenas se a API está em execução, não a disponibilidade do banco ou do broker.
 
 ### Primeiro fluxo de uso

@@ -25,6 +25,7 @@
     <ProjectReference Include="..\..\src\CoreBanking.Api\CoreBanking.Api.csproj" />
     <ProjectReference Include="..\..\src\CoreBanking.Infrastructure\CoreBanking.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\CoreBanking.Worker\CoreBanking.Worker.csproj" />
+    <ProjectReference Include="..\..\src\CoreBanking.Simulator\CoreBanking.Simulator.csproj" />
   </ItemGroup>
 
 </Project>
