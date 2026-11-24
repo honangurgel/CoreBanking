@@ -1,0 +1,15 @@
+@CoreBanking.Api_HostAddress = http://localhost:5027
+
+GET {{CoreBanking.Api_HostAddress}}/health
+Accept: application/json
+
+###
+
+POST {{CoreBanking.Api_HostAddress}}/api/v1/customers
+Content-Type: application/json
+
+{
+  "name": "Cliente Fictício"
+}
+
+###
