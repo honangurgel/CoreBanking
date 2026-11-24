@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Messaging;
 using CoreBanking.Infrastructure.Transfers;
@@ -53,6 +55,18 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             });
             db.OutboxMessages.Add(new OutboxMessage { Id = messageId, TransferId = transferId, CreatedAt = DateTimeOffset.UtcNow });
             await db.SaveChangesAsync();
+        }
+
+        // Simulate a confirmed publish followed by a crash before the Outbox was marked.
+        var initialFactory = new ConnectionFactory { Uri = new Uri(rabbit.GetConnectionString()) };
+        await using (var initialConnection = await initialFactory.CreateConnectionAsync())
+        await using (var initialChannel = await initialConnection.CreateChannelAsync(
+            new CreateChannelOptions(publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true)))
+        {
+            await CoreBanking.Worker.TransferQueues.DeclareAsync(initialChannel, CancellationToken.None);
+            var body = JsonSerializer.SerializeToUtf8Bytes(new { MessageId = messageId, TransferId = transferId });
+            await initialChannel.BasicPublishAsync("", CoreBanking.Worker.TransferQueues.Main, mandatory: true,
+                basicProperties: new BasicProperties { Persistent = true }, body: body);
         }
 
         var services = new ServiceCollection()
@@ -161,6 +175,9 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
                 return await db.InboxMessages.AnyAsync(item => item.Id == messageId);
             }, worker);
             Assert.Equal(failures + 1, processor.Attempts);
+            var times = processor.AttemptTimes.ToArray();
+            Assert.True(times[1] - times[0] >= TimeSpan.FromMilliseconds(900));
+            Assert.True(times[2] - times[1] >= TimeSpan.FromMilliseconds(1900));
             await using var verification = CreateContext();
             Assert.Equal(1, await verification.InboxMessages.CountAsync(item => item.Id == messageId));
             Assert.Equal(0u, (await channel.QueueDeclarePassiveAsync(CoreBanking.Worker.TransferQueues.Failed)).MessageCount);
@@ -177,10 +194,13 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
     private sealed class FailingProcessor(int failures, string connectionString) : CoreBanking.Worker.ITransferEventProcessor
     {
         private int attempts;
+        private readonly Stopwatch clock = Stopwatch.StartNew();
+        public ConcurrentQueue<TimeSpan> AttemptTimes { get; } = new();
         public int Attempts => Volatile.Read(ref attempts);
 
         public async Task ProcessAsync(Guid messageId, Guid transferId, CancellationToken cancellationToken)
         {
+            AttemptTimes.Enqueue(clock.Elapsed);
             if (Interlocked.Increment(ref attempts) <= failures)
             {
                 throw new CoreBanking.Worker.MessageProcessingException("Falha simulada.");
