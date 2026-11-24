@@ -53,7 +53,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** tornar o registro contábil a fonte de verdade de toda movimentação.
 
-**Status:** implementação interna em andamento. Contas contábeis, partidas em centavos, projeções e estornos foram introduzidos. A abertura de uma conta de cliente cria sua conta contábil e a API consulta o saldo; a exposição de movimentações fica para a próxima etapa. A validação da versão atual e a aplicação das migrations no banco de desenvolvimento ainda estão pendentes.
+**Status:** contas contábeis, partidas em centavos, projeções e estornos foram introduzidos. A abertura de conta cria sua conta contábil, a API consulta o saldo e as migrations do ledger foram aplicadas ao banco de desenvolvimento.
 
 - Modelar lançamentos e partidas de dupla entrada por moeda.
 - Representar BRL em centavos inteiros e proibir valores de ponto flutuante no domínio monetário.
@@ -67,6 +67,8 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** movimentar saldo entre contas sem duplicidade nem saldo inconsistente.
 
+**Status:** implementação em andamento, com depósitos fictícios para gerar saldo de demonstração e transferências internas idempotentes. As novas migrations ainda devem ser aplicadas após validação.
+
 - Criar o caso de uso de transferência com débito e crédito na mesma transação PostgreSQL.
 - Definir chave de idempotência, escopo, retenção e comportamento de repetição com mesma chave e conteúdo diferente.
 - Definir estratégia de concorrência e ordem determinística de bloqueio das contas envolvidas.
@@ -77,6 +79,8 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 ### 5. Adicionar Outbox, broker e workers
 
 **Objetivo:** aceitar operações assíncronas com entrega confiável entre banco e mensageria.
+
+**Status:** Outbox e Inbox para eventos de transferência e worker RabbitMQ foram introduzidos; processamento de operações externas, política de falhas completa e reprocessamento permanecem pendentes.
 
 - Gravar evento de Outbox na mesma transação do estado de negócio que o origina.
 - Publicar eventos pendentes no RabbitMQ por meio de um dispatcher recuperável.
@@ -91,6 +95,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 **Objetivo:** emular o serviço externo sem acessar sistemas reais.
 
 - Criar um serviço local com contratos fictícios para consulta, comunicação, liquidação e reporte.
+- Usar nomes e códigos públicos de instituições reais apenas como referência; clientes, contas, chaves e liquidações serão fictícios, sem comunicação com instituições reais.
 - Permitir configurar latência, falhas temporárias, rejeições de negócio, respostas duplicadas e indisponibilidade.
 - Implementar adaptador de integração no worker, isolando protocolo externo do domínio.
 - Aplicar limites de taxa e concorrência configuráveis e compartilhados entre instâncias de worker.

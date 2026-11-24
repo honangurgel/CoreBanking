@@ -69,7 +69,7 @@ PostgreSQL        Broker de mensagens
 | Mensageria | RabbitMQ, executado localmente em container |
 | Automação | GitHub Actions |
 
-As versões de dependências são registradas nos arquivos do projeto e devem ser atualizadas conforme compatibilidade e suporte. Clientes e contas têm implementação inicial; o ledger está em desenvolvimento. As movimentações pela API e a integração simulada ainda serão implementadas.
+As versões de dependências são registradas nos arquivos do projeto e devem ser atualizadas conforme compatibilidade e suporte. Clientes, contas, depósitos e transferências internas fictícias têm implementação inicial; a integração Pix simulada ainda será implementada.
 
 ### Módulos de domínio
 
@@ -112,13 +112,17 @@ Uma operação que dependa de confirmação externa não será apresentada como 
 - Chaves de idempotência terão escopo e política de retenção definidos; requisições repetidas não poderão executar a mesma operação financeira duas vezes.
 - A trilha de auditoria registrará identificadores, estados e horários sem incluir segredos ou dados pessoais reais.
 
-### Ledger interno em desenvolvimento
+### Ledger e movimentações fictícias
 
 O componente interno de ledger utiliza contas contábeis vinculadas a contas de clientes ou destinadas a contrapartidas do sistema. Cada partida usa centavos em BRL: valores positivos aumentam o saldo e negativos o diminuem. Uma conta de cliente não pode ficar negativa; uma conta de contrapartida pode.
 
 O lançamento exige ao menos duas contas distintas, valores não nulos e soma zero. A migration adiciona proteções no PostgreSQL para rejeitar lançamentos incompletos ou desbalanceados, alterações de histórico e atualizações diretas de saldo. A confirmação atualiza as projeções de saldo na mesma transação, com bloqueio das contas em ordem determinística. Um estorno contém as partidas opostas ao lançamento original e não pode ser aplicado duas vezes ao mesmo lançamento.
 
-Uma conta contábil de saldo zero é criada na mesma transação da conta de cliente; uma migration cria contas contábeis para contas já existentes. A API consulta a projeção de saldo, mas ainda não expõe movimentações. A associação às operações bancárias e a idempotência das requisições serão implementadas posteriormente.
+Uma conta contábil de saldo zero é criada na mesma transação da conta de cliente; uma migration cria contas contábeis para contas já existentes. A API consulta a projeção e permite depósitos e transferências internos fictícios. Depósitos utilizam uma conta interna de contrapartida. Transferências com saldo insuficiente são registradas como rejeitadas, sem lançamentos.
+
+Depósitos e transferências exigem o cabeçalho `Idempotency-Key` (até 128 caracteres, sem espaços nas extremidades). A chave é única por tipo de operação e é mantida sem expiração. Repetir dados idênticos retorna o mesmo resultado; repetir a chave com dados diferentes retorna `409`. Uma transferência rejeitada por saldo insuficiente mantém sua rejeição: uma nova tentativa exige outra chave. Contas inexistentes e entradas inválidas não reservam a chave.
+
+Uma transferência concluída grava o evento na Outbox junto com o lançamento e a operação. O worker publica eventos persistentes com confirmação no RabbitMQ; um consumidor registra a Inbox antes de confirmar a mensagem, deduplicando entregas. Mensagens inválidas vão para `corebanking.transfers.failed`. Em falhas de infraestrutura, o worker registra o erro e tenta reconectar com atraso progressivo; ainda não há ferramenta de reprocessamento nem limite de tentativas. Isso não representa comunicação ou liquidação com o BACEN.
 
 ## Escala e metas de carga
 
@@ -182,7 +186,15 @@ Execute `dotnet test` em outro terminal: os testes de integração exigem Docker
 
 O GitHub Actions também executa restore, build e testes em pushes e pull requests, usando um runner Linux com Docker. Isso permite validar o código no CI sem alterar a política de segurança do Windows, mas não garante que os executáveis serão aceitos localmente.
 
-O endpoint `GET /health` verifica apenas se a API está em execução, não a disponibilidade do banco ou do broker. O worker ainda não possui consumidores RabbitMQ.
+Para executar o worker em outro terminal, após aplicar as migrations:
+
+```powershell
+$env:ConnectionStrings__Banking = "Host=localhost;Port=5432;Database=corebanking;Username=corebanking;Password=corebanking_local"
+$env:RabbitMQ__ConnectionString = "amqp://corebanking:corebanking_local@localhost:5672/"
+dotnet run --project .\src\CoreBanking.Worker
+```
+
+O endpoint `GET /health` verifica apenas se a API está em execução, não a disponibilidade do banco ou do broker.
 
 ### Primeiro fluxo de uso
 
@@ -195,7 +207,15 @@ $account = Invoke-RestMethod -Method Post -Uri http://localhost:5027/api/v1/acco
 Invoke-RestMethod -Uri "http://localhost:5027/api/v1/accounts/$($account.id)"
 ```
 
-O nome deve ter de 1 a 200 caracteres após remover espaços nas extremidades. Cada conta é criada em estado `Active` para um cliente existente, com saldo inicial zero. É possível criar múltiplas contas por cliente; não há fechamento, bloqueio ou movimentação pela API nesta etapa. Não existe autenticação ainda: a API é para demonstração local, não para exposição pública.
+O nome deve ter de 1 a 200 caracteres após remover espaços nas extremidades. Cada conta é criada em estado `Active` para um cliente existente, com saldo inicial zero. É possível criar múltiplas contas por cliente; ainda não há fechamento ou bloqueio. Não existe autenticação: a API é para demonstração local, não para exposição pública.
+
+Para criar dados sintéticos e creditá-los via ledger, com a API em execução:
+
+```powershell
+.\scripts\seed-demo.ps1 -Count 3
+```
+
+O script cria novos clientes e contas a cada execução, usa nomes aleatórios explicitamente fictícios e deposita 100.000 centavos por conta. Não apaga dados; se houver falha, os recursos já criados permanecem e seus IDs são exibidos. Não gera CPF, chaves Pix ou dados de cartões.
 
 ## API
 
@@ -206,8 +226,12 @@ O nome deve ter de 1 a 200 caracteres após remover espaços nas extremidades. C
 | `GET` | `/api/v1/customers/{customerId}` | Consultar cliente |
 | `POST` | `/api/v1/accounts` | Abrir conta |
 | `GET` | `/api/v1/accounts/{accountId}` | Consultar conta e saldo em centavos (`balanceMinor`, moeda `BRL`) |
+| `POST` | `/api/v1/deposits` | Depósito fictício; corpo `accountId`, `amountMinor` |
+| `GET` | `/api/v1/deposits/{depositId}` | Consultar depósito |
+| `POST` | `/api/v1/transfers` | Transferência interna; corpo `sourceAccountId`, `destinationAccountId`, `amountMinor` |
+| `GET` | `/api/v1/transfers/{transferId}` | Consultar transferência |
 
-As criações retornam `201 Created` e o endereço do recurso em `Location`; entradas inválidas retornam `400`, e identificadores inexistentes retornam `404`. As operações de criação ainda não implementam idempotência. Extratos, transferências, Pix e consulta de operações assíncronas estão planejados para fases posteriores.
+As criações retornam `201 Created` e o endereço do recurso em `Location`; entradas inválidas retornam `400`, e identificadores inexistentes retornam `404`. A criação de cliente e conta ainda não implementa idempotência. Extratos, Pix e consulta de operações externas assíncronas estão planejados para fases posteriores.
 
 ## Testes
 
@@ -238,7 +262,7 @@ A organização poderá evoluir durante a implementação, preservando os limite
 
 ## Status
 
-**Implementação inicial.** O cadastro de clientes fictícios e a abertura e consulta de contas estão implementados com PostgreSQL e migration. O ledger interno está em desenvolvimento; as operações financeiras pela API e a integração simulada ainda não estão implementadas. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
+**Implementação inicial.** Clientes, contas, ledger, depósitos e transferências internas fictícias, Outbox/Inbox e worker de eventos estão em desenvolvimento. A integração Pix simulada ainda não está implementada. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
 
 ## Referências
 

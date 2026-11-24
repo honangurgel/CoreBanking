@@ -88,6 +88,128 @@ namespace CoreBanking.Infrastructure.Migrations
                         });
                 });
 
+            modelBuilder.Entity("CoreBanking.Infrastructure.Deposits.DepositRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AmountMinor")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<Guid?>("LedgerEntryId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique();
+
+                    b.ToTable("Deposits", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Deposits_Amount", "\"AmountMinor\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Messaging.InboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("TransferId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TransferId");
+
+                    b.ToTable("InboxMessages");
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Messaging.OutboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("PublishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("TransferId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TransferId")
+                        .IsUnique();
+
+                    b.ToTable("OutboxMessages");
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Transfers.TransferRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AmountMinor")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("DestinationAccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<Guid?>("LedgerEntryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("SourceAccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique();
+
+                    b.ToTable("Transfers", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Transfers_Accounts", "\"SourceAccountId\" <> \"DestinationAccountId\"");
+
+                            t.HasCheckConstraint("CK_Transfers_Amount", "\"AmountMinor\" > 0");
+
+                            t.HasCheckConstraint("CK_Transfers_Status", "\"Status\" IN ('Pending', 'Completed', 'InsufficientFunds')");
+                        });
+                });
+
             modelBuilder.Entity("CoreBanking.Domain.Accounts.Account", b =>
                 {
                     b.HasOne("CoreBanking.Domain.Customers.Customer", null)
@@ -103,6 +225,24 @@ namespace CoreBanking.Infrastructure.Migrations
                         .WithOne()
                         .HasForeignKey("CoreBanking.Domain.Ledger.LedgerAccount", "CustomerAccountId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Messaging.InboxMessage", b =>
+                {
+                    b.HasOne("CoreBanking.Infrastructure.Transfers.TransferRecord", null)
+                        .WithMany()
+                        .HasForeignKey("TransferId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Messaging.OutboxMessage", b =>
+                {
+                    b.HasOne("CoreBanking.Infrastructure.Transfers.TransferRecord", null)
+                        .WithMany()
+                        .HasForeignKey("TransferId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }
