@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using CoreBanking.Domain.Ledger;
 using CoreBanking.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -52,7 +53,18 @@ public sealed class CustomerAccountApiTests : IAsyncLifetime
             accountId = account.Id;
             Assert.Equal(customerId, account.CustomerId);
             Assert.Equal("Active", account.Status);
+            Assert.Equal(0, account.BalanceMinor);
+            Assert.Equal("BRL", account.Currency);
             Assert.Equal($"/api/v1/accounts/{accountId}", accountResponse.Headers.Location?.OriginalString);
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<BankingDbContext>();
+            var customerLedger = await db.LedgerAccounts.AsNoTracking().SingleAsync(item => item.CustomerAccountId == accountId);
+            var systemLedger = LedgerAccount.ForSystem();
+            var writer = new LedgerWriter(db);
+            await writer.CreateAccountAsync(systemLedger);
+            await writer.PostAsync(LedgerEntry.Create("Crédito fictício",
+                [new(customerLedger.Id, 123), new(systemLedger.Id, -123)]));
         }
 
         using var restartedFactory = CreateFactory();
@@ -64,6 +76,8 @@ public sealed class CustomerAccountApiTests : IAsyncLifetime
         Assert.NotNull(persistedAccount);
         Assert.Equal(customerId, persistedAccount.CustomerId);
         Assert.Equal("Active", persistedAccount.Status);
+        Assert.Equal(123, persistedAccount.BalanceMinor);
+        Assert.Equal("BRL", persistedAccount.Currency);
     }
 
     [Fact]
@@ -88,5 +102,5 @@ public sealed class CustomerAccountApiTests : IAsyncLifetime
     }
 
     private sealed record CustomerResponse(Guid Id, string Name);
-    private sealed record AccountResponse(Guid Id, Guid CustomerId, string Status);
+    private sealed record AccountResponse(Guid Id, Guid CustomerId, string Status, long BalanceMinor, string Currency);
 }

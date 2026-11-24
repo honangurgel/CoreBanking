@@ -118,7 +118,7 @@ O componente interno de ledger utiliza contas contábeis vinculadas a contas de 
 
 O lançamento exige ao menos duas contas distintas, valores não nulos e soma zero. A migration adiciona proteções no PostgreSQL para rejeitar lançamentos incompletos ou desbalanceados, alterações de histórico e atualizações diretas de saldo. A confirmação atualiza as projeções de saldo na mesma transação, com bloqueio das contas em ordem determinística. Um estorno contém as partidas opostas ao lançamento original e não pode ser aplicado duas vezes ao mesmo lançamento.
 
-Essa etapa ainda não expõe operações pela API nem cria contas contábeis automaticamente na abertura de uma conta de cliente. A associação às operações bancárias e a idempotência das requisições serão implementadas posteriormente.
+Uma conta contábil de saldo zero é criada na mesma transação da conta de cliente; uma migration cria contas contábeis para contas já existentes. A API consulta a projeção de saldo, mas ainda não expõe movimentações. A associação às operações bancárias e a idempotência das requisições serão implementadas posteriormente.
 
 ## Escala e metas de carga
 
@@ -195,7 +195,7 @@ $account = Invoke-RestMethod -Method Post -Uri http://localhost:5027/api/v1/acco
 Invoke-RestMethod -Uri "http://localhost:5027/api/v1/accounts/$($account.id)"
 ```
 
-O nome deve ter de 1 a 200 caracteres após remover espaços nas extremidades. Cada conta é criada em estado `Active` para um cliente existente. É possível criar múltiplas contas por cliente; não há fechamento, bloqueio, saldo ou movimentação nesta etapa. Não existe autenticação ainda: a API é para demonstração local, não para exposição pública.
+O nome deve ter de 1 a 200 caracteres após remover espaços nas extremidades. Cada conta é criada em estado `Active` para um cliente existente, com saldo inicial zero. É possível criar múltiplas contas por cliente; não há fechamento, bloqueio ou movimentação pela API nesta etapa. Não existe autenticação ainda: a API é para demonstração local, não para exposição pública.
 
 ## API
 
@@ -205,7 +205,7 @@ O nome deve ter de 1 a 200 caracteres após remover espaços nas extremidades. C
 | `POST` | `/api/v1/customers` | Cadastrar cliente fictício |
 | `GET` | `/api/v1/customers/{customerId}` | Consultar cliente |
 | `POST` | `/api/v1/accounts` | Abrir conta |
-| `GET` | `/api/v1/accounts/{accountId}` | Consultar conta |
+| `GET` | `/api/v1/accounts/{accountId}` | Consultar conta e saldo em centavos (`balanceMinor`, moeda `BRL`) |
 
 As criações retornam `201 Created` e o endereço do recurso em `Location`; entradas inválidas retornam `400`, e identificadores inexistentes retornam `404`. As operações de criação ainda não implementam idempotência. Extratos, transferências, Pix e consulta de operações assíncronas estão planejados para fases posteriores.
 

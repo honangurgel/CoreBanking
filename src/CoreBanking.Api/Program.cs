@@ -58,22 +58,22 @@ app.MapPost("/api/v1/accounts", async (OpenAccountRequest request, IBankingRepos
 
     var account = Account.Open(request.CustomerId);
     await repository.AddAccountAsync(account, cancellationToken);
-    return Results.Created($"/api/v1/accounts/{account.Id}", new AccountResponse(account.Id, account.CustomerId, account.Status.ToString(), account.OpenedAt));
+    return Results.Created($"/api/v1/accounts/{account.Id}", new AccountResponse(account.Id, account.CustomerId, account.Status.ToString(), account.OpenedAt, 0, "BRL"));
 });
 
 app.MapGet("/api/v1/accounts/{accountId:guid}", async (Guid accountId, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
-    var account = await repository.FindAccountAsync(accountId, cancellationToken);
-    return account is null
+    var details = await repository.FindAccountAsync(accountId, cancellationToken);
+    return details is null
         ? Results.NotFound()
-        : Results.Ok(new AccountResponse(account.Id, account.CustomerId, account.Status.ToString(), account.OpenedAt));
+        : Results.Ok(new AccountResponse(details.Account.Id, details.Account.CustomerId, details.Account.Status.ToString(), details.Account.OpenedAt, details.BalanceMinor, "BRL"));
 });
 
 app.Run();
 
 public sealed record CreateCustomerRequest(string? Name);
 public sealed record OpenAccountRequest(Guid CustomerId);
-public sealed record AccountResponse(Guid Id, Guid CustomerId, string Status, DateTimeOffset OpenedAt);
+public sealed record AccountResponse(Guid Id, Guid CustomerId, string Status, DateTimeOffset OpenedAt, long BalanceMinor, string Currency);
 
 public partial class Program
 {
