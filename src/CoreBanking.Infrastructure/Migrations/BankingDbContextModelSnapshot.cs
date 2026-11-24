@@ -65,6 +65,29 @@ namespace CoreBanking.Infrastructure.Migrations
                     b.ToTable("Customers");
                 });
 
+            modelBuilder.Entity("CoreBanking.Domain.Ledger.LedgerAccount", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("BalanceMinor")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid?>("CustomerAccountId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerAccountId")
+                        .IsUnique();
+
+                    b.ToTable("LedgerAccounts", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LedgerAccounts_CustomerBalance", "\"CustomerAccountId\" IS NULL OR \"BalanceMinor\" >= 0");
+                        });
+                });
+
             modelBuilder.Entity("CoreBanking.Domain.Accounts.Account", b =>
                 {
                     b.HasOne("CoreBanking.Domain.Customers.Customer", null)
@@ -72,6 +95,14 @@ namespace CoreBanking.Infrastructure.Migrations
                         .HasForeignKey("CustomerId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("CoreBanking.Domain.Ledger.LedgerAccount", b =>
+                {
+                    b.HasOne("CoreBanking.Domain.Accounts.Account", null)
+                        .WithOne()
+                        .HasForeignKey("CoreBanking.Domain.Ledger.LedgerAccount", "CustomerAccountId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 #pragma warning restore 612, 618
         }

@@ -69,7 +69,7 @@ PostgreSQL        Broker de mensagens
 | Mensageria | RabbitMQ, executado localmente em container |
 | Automação | GitHub Actions |
 
-As versões de dependências são registradas nos arquivos do projeto e devem ser atualizadas conforme compatibilidade e suporte. Clientes e contas têm implementação inicial; o ledger, as movimentações e a integração simulada ainda serão implementados.
+As versões de dependências são registradas nos arquivos do projeto e devem ser atualizadas conforme compatibilidade e suporte. Clientes e contas têm implementação inicial; o ledger está em desenvolvimento. As movimentações pela API e a integração simulada ainda serão implementadas.
 
 ### Módulos de domínio
 
@@ -111,6 +111,14 @@ Uma operação que dependa de confirmação externa não será apresentada como 
 - Operações concorrentes deverão preservar os invariantes financeiros no banco de dados.
 - Chaves de idempotência terão escopo e política de retenção definidos; requisições repetidas não poderão executar a mesma operação financeira duas vezes.
 - A trilha de auditoria registrará identificadores, estados e horários sem incluir segredos ou dados pessoais reais.
+
+### Ledger interno em desenvolvimento
+
+O componente interno de ledger utiliza contas contábeis vinculadas a contas de clientes ou destinadas a contrapartidas do sistema. Cada partida usa centavos em BRL: valores positivos aumentam o saldo e negativos o diminuem. Uma conta de cliente não pode ficar negativa; uma conta de contrapartida pode.
+
+O lançamento exige ao menos duas contas distintas, valores não nulos e soma zero. A migration adiciona proteções no PostgreSQL para rejeitar lançamentos incompletos ou desbalanceados, alterações de histórico e atualizações diretas de saldo. A confirmação atualiza as projeções de saldo na mesma transação, com bloqueio das contas em ordem determinística. Um estorno contém as partidas opostas ao lançamento original e não pode ser aplicado duas vezes ao mesmo lançamento.
+
+Essa etapa ainda não expõe operações pela API nem cria contas contábeis automaticamente na abertura de uma conta de cliente. A associação às operações bancárias e a idempotência das requisições serão implementadas posteriormente.
 
 ## Escala e metas de carga
 
@@ -172,6 +180,8 @@ O Compose publica as portas apenas em `localhost`. Para uso local, o PostgreSQL 
 
 Execute `dotnet test` em outro terminal: os testes de integração exigem Docker ativo e criam um PostgreSQL isolado e temporário. As migrations não são aplicadas automaticamente ao iniciar a API; execute o comando acima após atualizá-las. Para utilizar a API em um novo terminal, defina novamente `ConnectionStrings__Banking` antes de executar `dotnet run`.
 
+O GitHub Actions também executa restore, build e testes em pushes e pull requests, usando um runner Linux com Docker. Isso permite validar o código no CI sem alterar a política de segurança do Windows, mas não garante que os executáveis serão aceitos localmente.
+
 O endpoint `GET /health` verifica apenas se a API está em execução, não a disponibilidade do banco ou do broker. O worker ainda não possui consumidores RabbitMQ.
 
 ### Primeiro fluxo de uso
@@ -228,7 +238,7 @@ A organização poderá evoluir durante a implementação, preservando os limite
 
 ## Status
 
-**Implementação inicial.** O cadastro de clientes fictícios e a abertura e consulta de contas estão implementados com PostgreSQL e migration. O ledger, as operações financeiras e a integração simulada ainda não estão implementados. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
+**Implementação inicial.** O cadastro de clientes fictícios e a abertura e consulta de contas estão implementados com PostgreSQL e migration. O ledger interno está em desenvolvimento; as operações financeiras pela API e a integração simulada ainda não estão implementadas. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
 
 ## Referências
 

@@ -53,6 +53,8 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** tornar o registro contábil a fonte de verdade de toda movimentação.
 
+**Status:** implementação interna em andamento. Contas contábeis de clientes e de contrapartida, partidas em centavos, projeções e estornos foram introduzidos; a integração com contas de clientes e a exposição de operações ficam para as etapas seguintes. A validação completa da versão atual e a aplicação da migration no banco de desenvolvimento ainda estão pendentes.
+
 - Modelar lançamentos e partidas de dupla entrada por moeda.
 - Representar BRL em centavos inteiros e proibir valores de ponto flutuante no domínio monetário.
 - Tornar lançamentos confirmados imutáveis; representar correções por lançamentos compensatórios.
