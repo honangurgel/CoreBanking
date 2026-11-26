@@ -10,12 +10,48 @@ using CoreBanking.Infrastructure.Pix;
 using CoreBanking.Infrastructure.Transfers;
 using CoreBanking.Api;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.Net;
 using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddConsole(options => options.FormatterName = "json");
+
+var authMode = builder.Configuration["Authentication:Mode"] ?? "Oidc";
+if (authMode is not ("Oidc" or "Disabled"))
+    throw new InvalidOperationException("Authentication:Mode deve ser Oidc ou Disabled.");
+if (authMode == "Disabled" && !builder.Environment.IsDevelopment())
+    throw new InvalidOperationException("A autenticação só pode ser desativada em Development.");
+if (authMode == "Oidc")
+{
+    var authority = builder.Configuration["Authentication:Authority"];
+    var audience = builder.Configuration["Authentication:Audience"];
+    if (!Uri.TryCreate(authority, UriKind.Absolute, out var authorityUri) ||
+        !string.IsNullOrEmpty(authorityUri.UserInfo) || !string.IsNullOrEmpty(authorityUri.Query) ||
+        !string.IsNullOrEmpty(authorityUri.Fragment) ||
+        (authorityUri.Scheme != Uri.UriSchemeHttps &&
+         !(builder.Environment.IsDevelopment() && authorityUri.Scheme == Uri.UriSchemeHttp && authorityUri.IsLoopback)) ||
+        string.IsNullOrWhiteSpace(audience))
+        throw new InvalidOperationException("Configure Authentication:Authority HTTPS e Authentication:Audience; HTTP local é permitido apenas em Development.");
+
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
+    {
+        options.Authority = authority;
+        options.Audience = audience;
+        options.RequireHttpsMetadata = authorityUri.Scheme == Uri.UriSchemeHttps;
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters.RoleClaimType = "roles";
+        options.TokenValidationParameters.ValidAlgorithms = [SecurityAlgorithms.RsaSha256];
+    });
+    builder.Services.AddAuthorization(options =>
+    {
+        foreach (var role in new[] { "operador", "financeiro", "administrador" })
+            options.AddPolicy(role, policy => policy.RequireAuthenticatedUser().RequireClaim("typ", "Bearer").RequireRole(role));
+    });
+}
 
 builder.Services.AddOpenApi();
 builder.Services.AddDbContext<BankingDbContext>(options =>
@@ -56,7 +92,35 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+if (authMode == "Disabled")
+{
+    app.Use(async (context, next) =>
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        if (remote is null || !IPAddress.IsLoopback(remote.IsIPv4MappedToIPv6 ? remote.MapToIPv4() : remote))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        await next();
+    });
+}
 app.UseRateLimiter();
+if (authMode == "Oidc")
+{
+    app.UseAuthentication();
+    app.UseAuthorization();
+}
+
+var operators = app.MapGroup("/api/v1");
+var finance = app.MapGroup("/api/v1");
+var administrators = app.MapGroup("/api/v1");
+if (authMode == "Oidc")
+{
+    operators.RequireAuthorization("operador");
+    finance.RequireAuthorization("financeiro");
+    administrators.RequireAuthorization("administrador");
+}
 
 if (app.Environment.IsDevelopment())
 {
@@ -78,7 +142,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
     }
 });
 
-app.MapPost("/api/v1/customers", async (CreateCustomerRequest request, IBankingRepository repository, CancellationToken cancellationToken) =>
+operators.MapPost("/customers", async (CreateCustomerRequest request, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
     Customer customer;
     try
@@ -94,13 +158,13 @@ app.MapPost("/api/v1/customers", async (CreateCustomerRequest request, IBankingR
     return Results.Created($"/api/v1/customers/{customer.Id}", customer);
 });
 
-app.MapGet("/api/v1/customers/{customerId:guid}", async (Guid customerId, IBankingRepository repository, CancellationToken cancellationToken) =>
+operators.MapGet("/customers/{customerId:guid}", async (Guid customerId, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
     var customer = await repository.FindCustomerAsync(customerId, cancellationToken);
     return customer is null ? Results.NotFound() : Results.Ok(customer);
 });
 
-app.MapPost("/api/v1/accounts", async (OpenAccountRequest request, IBankingRepository repository, CancellationToken cancellationToken) =>
+operators.MapPost("/accounts", async (OpenAccountRequest request, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
     if (request.CustomerId == Guid.Empty)
     {
@@ -117,7 +181,7 @@ app.MapPost("/api/v1/accounts", async (OpenAccountRequest request, IBankingRepos
     return Results.Created($"/api/v1/accounts/{account.Id}", new AccountResponse(account.Id, account.CustomerId, account.Status.ToString(), account.OpenedAt, 0, "BRL"));
 });
 
-app.MapGet("/api/v1/accounts/{accountId:guid}", async (Guid accountId, IBankingRepository repository, CancellationToken cancellationToken) =>
+operators.MapGet("/accounts/{accountId:guid}", async (Guid accountId, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
     var details = await repository.FindAccountAsync(accountId, cancellationToken);
     return details is null
@@ -125,7 +189,7 @@ app.MapGet("/api/v1/accounts/{accountId:guid}", async (Guid accountId, IBankingR
         : Results.Ok(new AccountResponse(details.Account.Id, details.Account.CustomerId, details.Account.Status.ToString(), details.Account.OpenedAt, details.BalanceMinor, "BRL"));
 });
 
-app.MapPost("/api/v1/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, ITransferService transfers, ILogger<Program> logger, CancellationToken cancellationToken) =>
+finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, ITransferService transfers, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -153,13 +217,13 @@ app.MapPost("/api/v1/transfers", async (CreateTransferRequest request, HttpReque
     };
 });
 
-app.MapGet("/api/v1/transfers/{transferId:guid}", async (Guid transferId, ITransferService transfers, CancellationToken cancellationToken) =>
+operators.MapGet("/transfers/{transferId:guid}", async (Guid transferId, ITransferService transfers, CancellationToken cancellationToken) =>
 {
     var transfer = await transfers.FindAsync(transferId, cancellationToken);
     return transfer is null ? Results.NotFound() : Results.Ok(transfer);
 });
 
-app.MapPost("/api/v1/deposits", async (CreateDepositRequest request, HttpRequest httpRequest, IDepositService deposits, CancellationToken cancellationToken) =>
+finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest httpRequest, IDepositService deposits, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -181,13 +245,13 @@ app.MapPost("/api/v1/deposits", async (CreateDepositRequest request, HttpRequest
     };
 });
 
-app.MapGet("/api/v1/deposits/{depositId:guid}", async (Guid depositId, IDepositService deposits, CancellationToken cancellationToken) =>
+operators.MapGet("/deposits/{depositId:guid}", async (Guid depositId, IDepositService deposits, CancellationToken cancellationToken) =>
 {
     var deposit = await deposits.FindAsync(depositId, cancellationToken);
     return deposit is null ? Results.NotFound() : Results.Ok(deposit);
 });
 
-app.MapPost("/api/v1/pix/keys", async (CreatePixKeyRequest request, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapPost("/pix/keys", async (CreatePixKeyRequest request, IPixService pix, CancellationToken cancellationToken) =>
 {
     if (request.AccountId == Guid.Empty)
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["accountId"] = ["Informe uma conta."] });
@@ -195,13 +259,13 @@ app.MapPost("/api/v1/pix/keys", async (CreatePixKeyRequest request, IPixService 
     return key is null ? Results.NotFound(new { message = "Conta não encontrada." }) : Results.Created($"/api/v1/pix/keys/{key}", new PixKeyResult(key.Value, request.AccountId));
 });
 
-app.MapGet("/api/v1/pix/keys/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapGet("/pix/keys/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
 {
     var key = await pix.FindKeyAsync(id, cancellationToken);
     return key is null ? Results.NotFound() : Results.Ok(key);
 });
 
-app.MapPost("/api/v1/pix/operations", async (PixRequest request, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
+finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -224,19 +288,19 @@ app.MapPost("/api/v1/pix/operations", async (PixRequest request, HttpRequest htt
     };
 });
 
-app.MapGet("/api/v1/pix/operations/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapGet("/pix/operations/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
 {
     var result = await pix.FindAsync(id, cancellationToken);
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
-app.MapGet("/api/v1/pix/operations/{id:guid}/receipt", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapGet("/pix/operations/{id:guid}/receipt", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
 {
     var receipt = await pix.FindReceiptAsync(id, cancellationToken);
     return receipt is null ? Results.NotFound() : Results.Ok(receipt);
 });
 
-app.MapPost("/api/v1/pix/operations/{id:guid}/retry", async (Guid id, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
+administrators.MapPost("/pix/operations/{id:guid}/retry", async (Guid id, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     var retried = await pix.RetryAsync(id, cancellationToken);
     logger.LogInformation("Reprocessamento do Pix {OperationId}: {RetryAccepted}, requisição {RequestId}.",

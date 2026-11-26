@@ -27,7 +27,11 @@ public sealed class PixTests : IAsyncLifetime
     public async Task DisposeAsync() => await postgres.DisposeAsync();
     private BankingDbContext CreateContext() => new(new DbContextOptionsBuilder<BankingDbContext>().UseNpgsql(postgres.GetConnectionString()).Options);
     private WebApplicationFactory<Program> CreateApi() => new WebApplicationFactory<Program>().WithWebHostBuilder(
-        builder => builder.UseSetting("ConnectionStrings:Banking", postgres.GetConnectionString()));
+        builder =>
+        {
+            builder.UseSetting("ConnectionStrings:Banking", postgres.GetConnectionString());
+            builder.UseTestLoopback();
+        });
     private ServiceProvider CreateServices() => new ServiceCollection()
         .AddDbContext<BankingDbContext>(options => options.UseNpgsql(postgres.GetConnectionString())).BuildServiceProvider();
 

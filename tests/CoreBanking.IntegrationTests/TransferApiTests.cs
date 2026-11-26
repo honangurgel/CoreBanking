@@ -29,7 +29,10 @@ public sealed class TransferApiTests : IAsyncLifetime
 
     private WebApplicationFactory<Program> CreateFactory() =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-            builder.UseSetting("ConnectionStrings:Banking", postgres.GetConnectionString()));
+        {
+            builder.UseSetting("ConnectionStrings:Banking", postgres.GetConnectionString());
+            builder.UseTestLoopback();
+        });
 
     private static async Task<Guid> OpenAccountAsync(HttpClient client)
     {

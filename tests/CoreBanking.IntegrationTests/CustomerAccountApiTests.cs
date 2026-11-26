@@ -28,7 +28,10 @@ public sealed class CustomerAccountApiTests : IAsyncLifetime
 
     private WebApplicationFactory<Program> CreateFactory() =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-            builder.UseSetting("ConnectionStrings:Banking", postgres.GetConnectionString()));
+        {
+            builder.UseSetting("ConnectionStrings:Banking", postgres.GetConnectionString());
+            builder.UseTestLoopback();
+        });
 
     [Fact]
     public async Task CreatesCustomerAndAccount_AndPersistsAcrossHostRestart()

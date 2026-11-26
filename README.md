@@ -148,9 +148,42 @@ Aumentar o número de workers não deve permitir exceder o limite configurado pa
 - Não usar CPFs, chaves Pix ou dados de cartões de pessoas reais. Dados de exemplo devem ser claramente identificados como fictícios e não devem ser usados para validar identidades reais.
 - O simulador externo não fará chamadas de rede ao BACEN nem a participantes do Pix.
 
-Na revisão de demonstração, os perfis HTTP da API e do simulador e as portas do Compose estão configurados para loopback. Isso não impede que outra configuração os exponha: não há autenticação, autorização, TLS obrigatório ou isolamento entre usuários; não publique estes serviços nem utilize dados reais. O `/health/ready` exige configuração das dependências e expõe seus estados sem credenciais, mas não autentica consultas. O limite de entrada é local a cada instância e não substitui proteção contra abuso.
+Os perfis HTTP e as portas do Compose usam loopback. Em `Development`, a configuração explícita `Authentication:Mode=Disabled` desativa a autenticação e rejeita conexões cujo endereço remoto não seja loopback; **não coloque um proxy na frente desse modo**, pois conexões encaminhadas podem parecer locais. Em outros ambientes, desativá-la é proibido e a API exige OIDC configurado. O simulador não tem autenticação. Mesmo com OIDC, não há isolamento por cliente, TLS obrigatório na API, nem garantias para produção: não exponha os serviços nem use dados reais. `/health` e `/health/ready` são anônimos; o último expõe o estado das dependências. O rate limit é local a cada instância.
 
 Os valores padrão do Compose e exemplos no README são exclusivamente locais; alterá-los não torna o projeto adequado à produção. Arquivos `.env` e `.env.*` são ignorados pelo Git, exceto `.env.example`, que deve conter somente exemplos sem segredos. Revise logs e configurações antes de compartilhá-los, e não habilite o registro de dados sensíveis do EF Core. Não há política automatizada de retenção ou exclusão de dados fictícios; use uma base isolada para cada demonstração ou teste.
+
+### Identidade e perfis operacionais
+
+A API aceita access tokens JWT assinados com RS256 por um provedor OIDC, validando assinatura, emissor, audiência e validade. Requer a claim `typ` igual a `Bearer` e roles na claim multivalorada `roles`. Os perfis são independentes: atribua todos os necessários a cada identidade.
+
+| Perfil | Permissões |
+| --- | --- |
+| `operador` | Cadastro de clientes, contas e chaves Pix; todas as consultas |
+| `financeiro` | Criação de depósitos, transferências e operações Pix |
+| `administrador` | Reprocessamento de operações Pix |
+
+Sem token válido, as rotas protegidas respondem `401`; sem o perfil exigido, `403`. Os perfis não limitam o acesso a contas específicas e não substituem segregação entre clientes, auditoria de identidade, gestão de credenciais ou proteção contra abuso.
+
+Para experimentar com Keycloak local e gratuito, defina credenciais temporárias em variáveis de ambiente e execute o perfil opcional:
+
+```powershell
+$env:KEYCLOAK_ADMIN_USER = '<usuario-admin-local>'
+$env:KEYCLOAK_ADMIN_PASSWORD = '<senha-admin-local>'
+docker compose --profile identity up -d keycloak
+```
+
+O Keycloak usa armazenamento de desenvolvimento efêmero: recriar ou remover o container perde a configuração. No console `http://localhost:8080`, crie um realm `corebanking`, os três realm roles acima e um client para obter access tokens. Configure mappers no client scope para incluir no **access token**: a audiência `corebanking-api` e os realm roles na claim multivalorada `roles` (não no ID token). Atribua ao usuário ou service account os roles apropriados e confirme as claims emitidas. Use Authorization Code com PKCE para clientes interativos; não salve segredos ou tokens no repositório.
+
+No terminal da API, além das conexões já documentadas, selecione OIDC explicitamente:
+
+```powershell
+$env:Authentication__Mode = 'Oidc'
+$env:Authentication__Authority = 'http://localhost:8080/realms/corebanking'
+$env:Authentication__Audience = 'corebanking-api'
+dotnet run --project .\src\CoreBanking.Api
+```
+
+Envie `Authorization: Bearer <access-token>` nas rotas protegidas. HTTP para discovery só é aceito em `Development` e para loopback; nos demais ambientes a autoridade deve ser HTTPS. O Keycloak `start-dev`, sua base efêmera e o modo sem autenticação servem apenas para testes locais. Reiniciar a API com outro modo requer alterar as variáveis e reiniciar o processo.
 
 ## Requisitos para desenvolvimento local
 
@@ -253,7 +286,7 @@ A API limita requisições por IP em janela fixa de um minuto, por instância, c
 
 API, worker e simulador emitem logs de console em JSON estruturado. Para acompanhar um Pix, busque `OperationId` (o `id` retornado pela API) nos logs da API, do worker e do simulador. Para transferências, busque `TransferId`; o worker também registra `MessageId` na publicação e no consumo, inclusive em falhas e reentregas. A API registra `RequestId` junto ao identificador retornado para vincular cada requisição à operação; replays idempotentes mantêm o mesmo identificador de operação. Reprocessamentos Pix registram se foram aceitos. Logs após processamento indicam o estado persistido, não garantem que uma linha foi emitida antes de uma interrupção.
 
-Esta é uma correlação por identificador de negócio, não tracing distribuído de spans. Não são registrados corpos, chaves de idempotência ou valores nos eventos adicionados; configure e proteja também os logs do framework e da infraestrutura. O projeto não armazena logs em banco nem em buffers próprios: configure coleta e retenção externamente. As mensagens registram apenas campos pequenos e não serializam payloads inteiros, mas o impacto no LOH e na vazão ainda precisa ser medido em testes de carga.
+Esta é uma correlação por identificador de negócio, não tracing distribuído de spans. Não são registrados corpos, chaves de idempotência ou valores nos eventos adicionados; configure e proteja também os logs do framework e da infraestrutura. O projeto não armazena logs em banco nem em buffers próprios: configure coleta e retenção externamente. As mensagens registram apenas campos pequenos e não serializam payloads inteiros; os resultados limitados de memória e vazão estão nos cenários de carga abaixo.
 
 ### Métricas operacionais
 
@@ -271,7 +304,7 @@ O worker publica instrumentos .NET `System.Diagnostics.Metrics` no meter `CoreBa
 
 As contagens são eventos por processo, não totais financeiros: reinícios, replays e falhas entre transação e emissão podem gerar perda ou duplicidade. Os indicadores de backlog consultam o PostgreSQL a cada 30 segundos somente enquanto houver um coletor inscrito; as filas RabbitMQ são consultadas no mesmo intervalo enquanto o worker estiver conectado e houver coletor. Erros são registrados e não produzem uma amostra de sucesso. As amostras são globais ao banco ou broker, portanto **não devem ser somadas entre workers**. Incluem Pix pendentes aguardando retry, mas não medem idade das mensagens RabbitMQ, operações em revisão, divergência do ledger nem disponibilidade do worker. Uma amostra antiga não é prova de saúde; monitore também o horário da coleta e a prontidão.
 
-As tags têm valores limitados, sem identificadores, chaves ou payloads; não há buffer de eventos na aplicação. As consultas de backlog agregam dados no banco, porém podem gerar custo em bases grandes. O consumo de memória, incluindo LOH, e o custo efetivo sob carga ainda não foram medidos.
+As tags têm valores limitados, sem identificadores, chaves ou payloads; não há buffer de eventos na aplicação. As consultas de backlog agregam dados no banco, porém podem gerar custo em bases grandes. As medições de LOH abaixo não isolam o custo das métricas.
 
 ### Primeiro fluxo de uso
 
@@ -322,6 +355,37 @@ Esse cenário usa containers temporários de PostgreSQL e RabbitMQ, HTTP loopbac
 
 Na mesma máquina de referência, com build Debug, 60,18 segundos de tráfego geraram 1.041 transferências; 7 foram observadas durante a interrupção, e drenagem e validação levaram 9,57 segundos após o tráfego. O LOH após o último GC observado foi de 754.024 para 852.432 bytes no processo inteiro. São observações de uma execução limitada e não estabelecem taxa máxima ou vazão sustentada de 10.000/min.
 
+### Carga Pix com processos separados
+
+Execute os cenários isoladamente, com Docker ativo:
+
+```powershell
+$env:COREBANKING_PIX_LOAD_SECONDS = '60'
+dotnet test .\tests\CoreBanking.IntegrationTests --filter 'FullyQualifiedName~PixProcessLoadTests' --logger 'console;verbosity=detailed'
+Remove-Item Env:\COREBANKING_PIX_LOAD_SECONDS
+```
+
+API, worker e simulador rodam como processos locais separados; PostgreSQL e RabbitMQ são containers temporários. Em testes separados, o simulador ou o worker é interrompido e reiniciado durante tráfego de quatro produtores em ciclo fechado, com pausa de 400 ms. O teste comprova aceitação e pendência/falha persistida durante a interrupção, reprocessa operações em revisão e confere confirmações, saldos e ledger. A duração mínima é de 10 a 60 segundos e há teto de 1.000 operações. Os percentis são limites superiores aproximados de aceitação HTTP, não de liquidação.
+
+Opcionalmente, instale `dotnet-counters` compatível com .NET 10 em um diretório de ferramentas local e defina `COREBANKING_DOTNET_COUNTERS` com o caminho absoluto do executável antes do comando acima. A coleta é por processo, a cada segundo, com duração de tráfego configurada mais 30 segundos, e falha se terminar antes do tráfego. Ela informa o maior `loh-size` amostrado para API e worker no cenário de falha do simulador; no reinício do worker mede apenas a API. Esses valores refletem o tamanho do LOH após GCs observados, podem incluir tempo após o tráfego e **não são o pico absoluto** nem medem o processo do simulador. A coleta temporária é removida ao fim.
+
+Exemplo no Windows, com a versão usada na medição:
+
+```powershell
+dotnet tool install dotnet-counters --version 10.0.750501 --tool-path "$env:TEMP\corebanking-tools"
+$env:COREBANKING_DOTNET_COUNTERS = "$env:TEMP\corebanking-tools\dotnet-counters.exe"
+$env:COREBANKING_PIX_LOAD_SECONDS = '60'
+dotnet test .\tests\CoreBanking.IntegrationTests --filter 'FullyQualifiedName~PixProcessLoadTests' --logger 'console;verbosity=detailed'
+Remove-Item Env:\COREBANKING_DOTNET_COUNTERS, Env:\COREBANKING_PIX_LOAD_SECONDS
+```
+
+Referência local de 26/11/2026, mesma máquina acima, build Release:
+
+- Falha do simulador: 530 Pix em 60,22 s, 212 durante a indisponibilidade; p50 ≤ 50 ms, p95 ≤ 50 ms, p99 ≤ 500 ms. Máximo amostrado após GC: 98.384 bytes na API e 98.384 no worker, com 90 amostras cada.
+- Falha do worker: 553 Pix em 60,24 s, 8 durante a indisponibilidade; p50 ≤ 50 ms, p95 ≤ 50 ms, p99 ≤ 100 ms. Máximo amostrado após GC: 98.384 bytes na API, com 90 amostras; worker não medido durante o reinício.
+
+São valores de uma execução por cenário, sem rede representativa; não comprovam 10.000 requisições/minuto.
+
 ## API
 
 | Método | Endpoint | Finalidade |
@@ -336,8 +400,14 @@ Na mesma máquina de referência, com build Debug, 60,18 segundos de tráfego ge
 | `GET` | `/api/v1/deposits/{depositId}` | Consultar depósito |
 | `POST` | `/api/v1/transfers` | Transferência interna; corpo `sourceAccountId`, `destinationAccountId`, `amountMinor` |
 | `GET` | `/api/v1/transfers/{transferId}` | Consultar transferência |
+| `POST` | `/api/v1/pix/keys` | Criar chave Pix fictícia |
+| `GET` | `/api/v1/pix/keys/{id}` | Consultar chave Pix fictícia |
+| `POST` | `/api/v1/pix/operations` | Criar operação Pix fictícia |
+| `GET` | `/api/v1/pix/operations/{id}` | Consultar operação Pix |
+| `GET` | `/api/v1/pix/operations/{id}/receipt` | Consultar comprovante Pix |
+| `POST` | `/api/v1/pix/operations/{id}/retry` | Reprocessar operação em revisão |
 
-As criações retornam `201 Created` e o endereço do recurso em `Location`; entradas inválidas retornam `400`, e identificadores inexistentes retornam `404`. A criação de cliente e conta ainda não implementa idempotência. Extratos, Pix e consulta de operações externas assíncronas estão planejados para fases posteriores.
+Clientes, contas, depósitos e transferências criados retornam `201 Created`; operações Pix aceitas e reprocessamentos retornam `202 Accepted`. Entradas inválidas retornam `400`. A criação de cliente e conta ainda não implementa idempotência; extratos permanecem planejados.
 
 ## Testes
 

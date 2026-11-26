@@ -122,7 +122,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** tornar falhas e gargalos detectáveis e o comportamento seguro para uma demonstração.
 
-**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências. Há métricas do worker, backlog persistido e mensagens prontas no RabbitMQ; tracing distribuído, idade das mensagens RabbitMQ e métricas contínuas de divergência contábil permanecem pendentes. A revisão da demonstração está descrita no README; autenticação, autorização e isolamento permanecem ausentes.
+**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências. Há métricas do worker, backlog persistido e mensagens prontas no RabbitMQ; tracing distribuído, idade das mensagens RabbitMQ e métricas contínuas de divergência contábil permanecem pendentes. A API suporta OIDC com perfis operacionais independentes e modo local de desenvolvimento sem autenticação. O isolamento entre clientes continua ausente; não é adequada à exposição pública.
 
 - Adicionar logs estruturados e correlação de ponta a ponta por operação.
 - Instrumentar métricas de taxa, latência, tamanho/idade das filas, retries, falhas e divergência entre ledger e projeção.
@@ -136,7 +136,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** avaliar a meta de 10.000 requisições por minuto e registrar os limites medidos.
 
-**Status:** há cenário isolado de transferências concorrentes com validação contábil, observação limitada do LOH e um script de demonstração Pix. Outro cenário usa Kestrel local e worker com tráfego sustentado durante a interrupção e recuperação do RabbitMQ; seus limites e resultados estão no README. Permanecem pendentes carga de Pix e simulador, testes com processos separados e rede representativa, percentis de latência e outras falhas durante a carga.
+**Status:** há cenário isolado de transferências concorrentes e outro com tráfego durante a recuperação do RabbitMQ. A carga Pix usa processos separados, interrupção de simulador ou worker, percentis aproximados de aceitação e amostragem opcional de LOH após GC. Os resultados e suas limitações estão no README. Permanecem pendentes rede representativa, latência de liquidação e validação da meta de capacidade.
 
 - Criar cenários de carga reproduzíveis para taxa média e picos.
 - Separar carga de entrada na API de capacidade do simulador e vazão dos workers.

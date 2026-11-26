@@ -11,6 +11,7 @@ using Xunit.Abstractions;
 
 namespace CoreBanking.IntegrationTests;
 
+[Collection("Load scenarios")]
 public sealed class LoadScenarioTests(ITestOutputHelper output) : IAsyncLifetime
 {
     private readonly PostgreSqlContainer postgres = new PostgreSqlBuilder("postgres:18-alpine").Build();
@@ -35,6 +36,7 @@ public sealed class LoadScenarioTests(ITestOutputHelper output) : IAsyncLifetime
         using var api = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:Banking", postgres.GetConnectionString());
+            builder.UseTestLoopback();
             builder.UseSetting("RateLimiting:PermitsPerMinute", (count + 10).ToString());
             builder.ConfigureLogging(logging => logging.ClearProviders());
         });

@@ -15,6 +15,7 @@ using Xunit.Abstractions;
 
 namespace CoreBanking.IntegrationTests;
 
+[Collection("Load scenarios")]
 public sealed class RecoveryLoadTests(ITestOutputHelper output) : IAsyncLifetime
 {
     private readonly PostgreSqlContainer postgres = new PostgreSqlBuilder("postgres:18-alpine").Build();

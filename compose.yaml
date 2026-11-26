@@ -31,6 +31,16 @@ services:
       timeout: 5s
       retries: 10
 
+  keycloak:
+    profiles: ["identity"]
+    image: quay.io/keycloak/keycloak:26.4
+    command: ["start-dev"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+
 volumes:
   postgres_data:
   rabbitmq_data:

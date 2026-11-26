@@ -17,7 +17,8 @@ public class HealthEndpointTests(WebApplicationFactory<Program> factory)
     [Fact]
     public async Task GetHealth_ReturnsHealthyStatus()
     {
-        using var client = factory.CreateClient();
+        using var local = factory.WithWebHostBuilder(builder => builder.UseTestLoopback());
+        using var client = local.CreateClient();
         using var response = await client.GetAsync("/health");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -32,7 +33,10 @@ public class HealthEndpointTests(WebApplicationFactory<Program> factory)
     public async Task Requests_AboveConfiguredLimit_ReturnTooManyRequestsExceptHealth()
     {
         using var limited = factory.WithWebHostBuilder(builder =>
-            builder.UseSetting("RateLimiting:PermitsPerMinute", "2"));
+        {
+            builder.UseSetting("RateLimiting:PermitsPerMinute", "2");
+            builder.UseTestLoopback();
+        });
         using var client = limited.CreateClient();
 
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/v1/unknown")).StatusCode);
@@ -111,6 +115,7 @@ public sealed class DependencyHealthTests : IAsyncLifetime
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:Banking", database);
+            builder.UseTestLoopback();
             builder.UseSetting("RabbitMQ:ConnectionString", broker);
             builder.UseSetting("Pix:SimulatorUrl", simulator);
         });
