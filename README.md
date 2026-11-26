@@ -148,6 +148,10 @@ Aumentar o número de workers não deve permitir exceder o limite configurado pa
 - Não usar CPFs, chaves Pix ou dados de cartões de pessoas reais. Dados de exemplo devem ser claramente identificados como fictícios e não devem ser usados para validar identidades reais.
 - O simulador externo não fará chamadas de rede ao BACEN nem a participantes do Pix.
 
+Na revisão de demonstração, os perfis HTTP da API e do simulador e as portas do Compose estão configurados para loopback. Isso não impede que outra configuração os exponha: não há autenticação, autorização, TLS obrigatório ou isolamento entre usuários; não publique estes serviços nem utilize dados reais. O `/health/ready` exige configuração das dependências e expõe seus estados sem credenciais, mas não autentica consultas. O limite de entrada é local a cada instância e não substitui proteção contra abuso.
+
+Os valores padrão do Compose e exemplos no README são exclusivamente locais; alterá-los não torna o projeto adequado à produção. Arquivos `.env` e `.env.*` são ignorados pelo Git, exceto `.env.example`, que deve conter somente exemplos sem segredos. Revise logs e configurações antes de compartilhá-los, e não habilite o registro de dados sensíveis do EF Core. Não há política automatizada de retenção ou exclusão de dados fictícios; use uma base isolada para cada demonstração ou teste.
+
 ## Requisitos para desenvolvimento local
 
 Após a implementação da estrutura inicial, o ambiente de desenvolvimento deverá ter:
@@ -251,6 +255,24 @@ API, worker e simulador emitem logs de console em JSON estruturado. Para acompan
 
 Esta é uma correlação por identificador de negócio, não tracing distribuído de spans. Não são registrados corpos, chaves de idempotência ou valores nos eventos adicionados; configure e proteja também os logs do framework e da infraestrutura. O projeto não armazena logs em banco nem em buffers próprios: configure coleta e retenção externamente. As mensagens registram apenas campos pequenos e não serializam payloads inteiros, mas o impacto no LOH e na vazão ainda precisa ser medido em testes de carga.
 
+### Métricas operacionais
+
+O worker publica instrumentos .NET `System.Diagnostics.Metrics` no meter `CoreBanking.Worker`. Um coletor externo compatível é necessário; nenhum endpoint ou armazenamento de métricas é iniciado automaticamente. Com `dotnet-counters` instalado, por exemplo, use `dotnet-counters monitor --process-id <PID-do-worker> --counters CoreBanking.Worker`. Para HTTP, o ASP.NET Core disponibiliza suas métricas nativas, incluindo `http.server.request.duration` no meter `Microsoft.AspNetCore.Hosting`.
+
+| Instrumento | Significado |
+| --- | --- |
+| `corebanking.pix.processed` | Contagem de processamentos persistidos, por `status`; `Pending` indica nova tentativa agendada. |
+| `corebanking.pix.throttled` | Seleções adiadas por limite de taxa ou concorrência, não operações únicas. |
+| `corebanking.pix.simulator.duration` | Duração de cada chamada ao simulador, em segundos, inclusive falhas e cancelamentos. |
+| `corebanking.transfer.messages` | Eventos por `outcome`: `published`, `acknowledged`, `retry`, `failed` ou `invalid`. |
+| `corebanking.backlog.count` | Quantidade de Pix pendentes ou mensagens Outbox não publicadas, por `queue`. |
+| `corebanking.backlog.oldest.age` | Idade em segundos do registro mais antigo dessas filas, ou zero se vazias. |
+| `corebanking.rabbitmq.queue.ready` | Mensagens prontas em cada fila de transferências, sem incluir entregas ainda não confirmadas. |
+
+As contagens são eventos por processo, não totais financeiros: reinícios, replays e falhas entre transação e emissão podem gerar perda ou duplicidade. Os indicadores de backlog consultam o PostgreSQL a cada 30 segundos somente enquanto houver um coletor inscrito; as filas RabbitMQ são consultadas no mesmo intervalo enquanto o worker estiver conectado e houver coletor. Erros são registrados e não produzem uma amostra de sucesso. As amostras são globais ao banco ou broker, portanto **não devem ser somadas entre workers**. Incluem Pix pendentes aguardando retry, mas não medem idade das mensagens RabbitMQ, operações em revisão, divergência do ledger nem disponibilidade do worker. Uma amostra antiga não é prova de saúde; monitore também o horário da coleta e a prontidão.
+
+As tags têm valores limitados, sem identificadores, chaves ou payloads; não há buffer de eventos na aplicação. As consultas de backlog agregam dados no banco, porém podem gerar custo em bases grandes. O consumo de memória, incluindo LOH, e o custo efetivo sob carga ainda não foram medidos.
+
 ### Primeiro fluxo de uso
 
 Com a API em execução no perfil HTTP padrão (`http://localhost:5027`), crie um cliente e use o identificador retornado para abrir uma conta:
@@ -271,6 +293,22 @@ Para criar dados sintéticos e creditá-los via ledger, com a API em execução:
 ```
 
 O script cria novos clientes e contas a cada execução, usa nomes aleatórios explicitamente fictícios e deposita 100.000 centavos por conta. Não apaga dados; se houver falha, os recursos já criados permanecem e seus IDs são exibidos. Não gera CPF, chaves Pix ou dados de cartões.
+
+Para demonstrar Pix ponta a ponta, inicie API, simulador e worker com o mesmo PostgreSQL e RabbitMQ, conforme as instruções acima. Então execute `.\scripts\demo-pix.ps1`. O script aceita apenas endereço local, exige prontidão, cria uma nova conta fictícia, deposita 100.000 centavos, recebe 12.000 e envia 5.000; aguarda confirmações, verifica comprovantes e saldo final de 107.000 centavos. A conta e os registros permanecem no banco, inclusive em caso de falha; use um banco isolado quando não quiser persistir a demonstração.
+
+### Cenário de carga isolado
+
+O teste abaixo cria um PostgreSQL temporário por Testcontainers, executa transferências concorrentes entre duas contas fictícias e verifica idempotência, saldos, Outbox, partidas balanceadas e reconciliação das projeções. Não usa ou apaga o banco do Compose. O padrão é 40 operações; o valor pode ser alterado de 1 a 10.000. Execute-o separadamente para evitar interferência de outros testes:
+
+```powershell
+$env:COREBANKING_LOAD_OPERATIONS = '1000'
+dotnet test .\tests\CoreBanking.IntegrationTests --filter 'FullyQualifiedName~LoadScenarioTests' --logger 'console;verbosity=detailed'
+Remove-Item Env:\COREBANKING_LOAD_OPERATIONS
+```
+
+O cenário usa TestServer no próprio processo, até oito requisições concorrentes em ciclo fechado, uma única conta de origem e logs desativados; ajusta o limite da API para não bloquear a carga. Não mede rede HTTP real, worker, simulador, mensagens RabbitMQ, rejeições, distribuição de latência ou recuperação sob carga. A média por minuto é extrapolada do intervalo observado, não prova vazão sustentada. O tamanho do LOH exibido corresponde ao último GC observado do processo inteiro de teste, não ao pico nem exclusivamente à aplicação.
+
+Referência local de 26/11/2026: Windows 10.0.26200, Intel i5-1334U, SDK .NET 10.0.101, Docker Engine 29.8.2, PostgreSQL 18 Alpine; 1.000 transferências em 18,95 segundos, média extrapolada de 3.167/min, LOH observado de 885.152 para 1.376.944 bytes. Não é uma garantia nem valida a meta de 10.000/min. A medição inclui o processo de teste e depende de GC, máquina e ambiente.
 
 ## API
 

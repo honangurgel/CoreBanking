@@ -122,7 +122,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** tornar falhas e gargalos detectáveis e o comportamento seguro para uma demonstração.
 
-**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências; tracing distribuído, métricas e medição de alocações e carga permanecem pendentes.
+**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências. Há métricas do worker, backlog persistido e mensagens prontas no RabbitMQ; tracing distribuído, idade das mensagens RabbitMQ e métricas contínuas de divergência contábil permanecem pendentes. A revisão da demonstração está descrita no README; autenticação, autorização e isolamento permanecem ausentes.
 
 - Adicionar logs estruturados e correlação de ponta a ponta por operação.
 - Instrumentar métricas de taxa, latência, tamanho/idade das filas, retries, falhas e divergência entre ledger e projeção.
@@ -135,6 +135,8 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 ### 9. Teste de carga e demonstração end-to-end
 
 **Objetivo:** avaliar a meta de 10.000 requisições por minuto e registrar os limites medidos.
+
+**Status:** há cenário isolado de transferências concorrentes com validação contábil, observação limitada do LOH e um script de demonstração Pix. Permanecem pendentes carga sustentada por rede real, carga de Pix e workers, percentis de latência e testes de falhas e recuperação durante a carga.
 
 - Criar cenários de carga reproduzíveis para taxa média e picos.
 - Separar carga de entrada na API de capacidade do simulador e vazão dos workers.

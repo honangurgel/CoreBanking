@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Diagnostics;
 using CoreBanking.Domain.Ledger;
 using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Pix;
@@ -63,10 +64,14 @@ public sealed class PixWorker(IServiceScopeFactory scopeFactory, IConfiguration 
             """).SingleOrDefaultAsync(cancellationToken);
         if (operation is null) return false;
         if (!await PixThrottle.TryAcquireAsync(db, scopeFactory, cancellationToken))
+        {
+            WorkerMetrics.RecordThrottle();
             return false;
+        }
 
         SimulatedResult? result = null;
         var requiresReview = false;
+        var started = Stopwatch.GetTimestamp();
         try
         {
             using var response = await client.PostAsJsonAsync("api/v1/settlements", new
@@ -119,6 +124,10 @@ public sealed class PixWorker(IServiceScopeFactory scopeFactory, IConfiguration 
             logger.LogError(exception, "Formato de resposta não suportado para Pix {OperationId}.", operation.Id);
             requiresReview = true;
         }
+        finally
+        {
+            WorkerMetrics.RecordSimulatorDuration(Stopwatch.GetElapsedTime(started).TotalSeconds);
+        }
 
         if (result is null)
         {
@@ -159,6 +168,7 @@ public sealed class PixWorker(IServiceScopeFactory scopeFactory, IConfiguration 
 
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        WorkerMetrics.RecordPix(operation.Status);
         logger.LogInformation("Pix {OperationId} processado com estado {Status} e {Attempts} falhas.",
             operation.Id, operation.Status, operation.Attempts);
         return true;

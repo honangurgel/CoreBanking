@@ -100,6 +100,7 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
     [Fact]
     public async Task PublishesAndDeduplicatesMessages_AndDeadLettersInvalidPayload()
     {
+        using var metrics = new WorkerMetricRecorder();
         var transferId = Guid.NewGuid();
         var messageId = Guid.NewGuid();
         await using (var db = CreateContext())
@@ -162,7 +163,8 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             await WaitForAsync(async () =>
             {
                 var result = await channel.QueueDeclarePassiveAsync("corebanking.transfers.failed");
-                return result.MessageCount == 1;
+                return result.MessageCount == 1 && metrics.Counts.Any(item =>
+                    item.Name == "corebanking.transfer.messages" && item.Tag == "invalid");
             }, worker);
             await using var verification = CreateContext();
             Assert.Equal(1, await verification.InboxMessages.CountAsync(item => item.Id == messageId));
@@ -174,6 +176,11 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
                 Equals(item.Properties.GetValueOrDefault("TransferId"), transferId)
                 && Equals(item.Properties.GetValueOrDefault("MessageId"), messageId)
                 && !item.Properties.ContainsKey("Attempt"));
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "published");
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "acknowledged");
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "invalid");
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.rabbitmq.queue.ready"
+                && item.Tag == CoreBanking.Worker.TransferQueues.Main && item.Value >= 0);
         }
         finally
         {
@@ -188,6 +195,7 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
     [InlineData(3)]
     public async Task ProcessingFailures_AreRetriedAndCanBeReprocessed(int failures)
     {
+        using var metrics = new WorkerMetricRecorder();
         var transferId = Guid.NewGuid();
         var messageId = Guid.NewGuid();
         await using (var db = CreateContext())
@@ -252,6 +260,9 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             Assert.Equal(1, await verification.InboxMessages.CountAsync(item => item.Id == messageId));
             Assert.Equal(0u, (await channel.QueueDeclarePassiveAsync(CoreBanking.Worker.TransferQueues.Failed)).MessageCount);
             Assert.False(await CoreBanking.Worker.TransferQueues.ReprocessNextAsync(channel, CancellationToken.None));
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "retry");
+            if (failures == 3)
+                Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "failed");
         }
         finally
         {

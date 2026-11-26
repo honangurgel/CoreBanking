@@ -139,8 +139,52 @@ public sealed class PixTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task BacklogMetrics_ReportPendingOperations()
+    {
+        using var api = CreateApi();
+        using var client = api.CreateClient();
+        var account = await AccountAsync(client);
+        using var response = await SubmitAsync(client,
+            new PixRequest(account, Guid.NewGuid(), "00000000", "Outgoing", 1, "Confirm"), "backlog-metrics");
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+        using var keyResponse = await client.PostAsJsonAsync("/api/v1/pix/keys", new { accountId = account });
+        keyResponse.EnsureSuccessStatusCode();
+        var key = (await keyResponse.Content.ReadFromJsonAsync<IdResponse>())!.Id;
+        using var pending = await SubmitAsync(client,
+            new PixRequest(account, key, "00000000", "Incoming", 1, "Confirm"), "pending-metrics");
+        Assert.Equal(HttpStatusCode.Accepted, pending.StatusCode);
+
+        using var metrics = new WorkerMetricRecorder();
+        await using var services = CreateServices();
+        using var monitor = new BacklogMonitor(services.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<BacklogMonitor>.Instance);
+        await monitor.StartAsync(CancellationToken.None);
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (!metrics.Counts.Any(item => item.Name == "corebanking.backlog.count" && item.Tag == "outbox")
+                && DateTime.UtcNow < deadline)
+            {
+                if (monitor.ExecuteTask is { IsFaulted: true }) await monitor.ExecuteTask;
+                await Task.Delay(100);
+            }
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.backlog.count"
+                && item.Tag == "pix" && item.Value == 1);
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.backlog.count"
+                && item.Tag == "outbox" && item.Value == 0);
+            Assert.Contains(metrics.Durations, item => item.Name == "corebanking.backlog.oldest.age" && item.Value >= 0);
+        }
+        finally
+        {
+            await monitor.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Unavailable_EntersReviewWithReservationUntilManualRetry()
     {
+        using var metrics = new WorkerMetricRecorder();
         using var logs = new RecordingLogProvider();
         using var api = CreateApi().WithWebHostBuilder(builder => builder.ConfigureLogging(logging => logging.AddProvider(logs)));
         using var client = api.CreateClient();
@@ -173,6 +217,9 @@ public sealed class PixTests : IAsyncLifetime
             && Equals(item.Properties.GetValueOrDefault("OperationId"), result.Id)
             && Equals(item.Properties.GetValueOrDefault("Status"), "RequiresReview")
             && Equals(item.Properties.GetValueOrDefault("Attempts"), 3));
+        Assert.Contains(metrics.Counts, item => item.Name == "corebanking.pix.processed"
+            && item.Value == 1 && item.Tag == "RequiresReview");
+        Assert.Contains(metrics.Durations, item => item.Name == "corebanking.pix.simulator.duration" && item.Value >= 0);
         Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
         Assert.Equal("Confirmed", (await client.GetFromJsonAsync<PixResult>($"/api/v1/pix/operations/{result.Id}"))!.Status);
         Assert.Equal(600, await BalanceAsync(client, account));
@@ -311,6 +358,7 @@ public sealed class PixTests : IAsyncLifetime
     [Fact]
     public async Task SharedConcurrencyLimit_DefersOtherWorkersUntilCallFinishes()
     {
+        using var metrics = new WorkerMetricRecorder();
         using var api = CreateApi();
         using var client = api.CreateClient();
         using var simulator = new WebApplicationFactory<SimulatorAssemblyMarker>();
@@ -331,6 +379,7 @@ public sealed class PixTests : IAsyncLifetime
         {
             await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
             Assert.False(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
+            Assert.Contains(metrics.Counts, item => item.Name == "corebanking.pix.throttled" && item.Value == 1);
         }
         finally
         {

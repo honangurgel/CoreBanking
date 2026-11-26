@@ -26,6 +26,7 @@ builder.Services.AddDbContext<BankingDbContext>(options =>
 builder.Services.AddScoped<ITransferEventProcessor, TransferEventProcessor>();
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddHostedService<PixWorker>();
+builder.Services.AddHostedService<BacklogMonitor>();
 
 var host = builder.Build();
 host.Run();

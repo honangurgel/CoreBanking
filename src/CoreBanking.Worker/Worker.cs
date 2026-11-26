@@ -40,8 +40,18 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
         await TransferQueues.DeclareAsync(channel, stoppingToken);
 
         logger.LogInformation("Worker de eventos iniciado.");
+        var nextQueueSample = 0L;
         while (!stoppingToken.IsCancellationRequested)
         {
+            if (WorkerMetrics.RabbitReadyEnabled && Environment.TickCount64 >= nextQueueSample)
+            {
+                foreach (var queue in new[] { TransferQueues.Main, TransferQueues.FirstRetry, TransferQueues.SecondRetry, TransferQueues.Failed })
+                {
+                    var state = await channel.QueueDeclarePassiveAsync(queue, stoppingToken);
+                    WorkerMetrics.RecordRabbitReady(queue, state.MessageCount);
+                }
+                nextQueueSample = Environment.TickCount64 + 30000;
+            }
             var published = await PublishNextAsync(channel, stoppingToken);
             var consumed = await ConsumeNextAsync(channel, stoppingToken);
             resetFailures();
@@ -74,6 +84,7 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
         message.PublishedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        WorkerMetrics.RecordTransfer("published");
         logger.LogInformation("Mensagem {MessageId} da transferência {TransferId} publicada na Outbox.",
             message.Id, message.TransferId);
         return true;
@@ -158,12 +169,16 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
                 await channel.BasicPublishAsync("", destination, mandatory: true, basicProperties: properties,
                     body: delivery.Body, cancellationToken: cancellationToken);
                 handled = false;
+                WorkerMetrics.RecordTransfer(attempt < 3 ? "retry" : "failed");
             }
         }
         await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
         if (handled)
+        {
+            WorkerMetrics.RecordTransfer("acknowledged");
             logger.LogInformation("Mensagem {MessageId} da transferência {TransferId} confirmada pela Inbox, tentativa {Attempt}.",
                 message.MessageId, message.TransferId, attempt);
+        }
         return true;
     }
 
@@ -179,6 +194,7 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
         await channel.BasicPublishAsync("", TransferQueues.Failed, mandatory: true, basicProperties: properties,
             body: delivery.Body, cancellationToken: cancellationToken);
         await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
+        WorkerMetrics.RecordTransfer("invalid");
     }
 
     private sealed record TransferCompleted(Guid MessageId, Guid TransferId);
