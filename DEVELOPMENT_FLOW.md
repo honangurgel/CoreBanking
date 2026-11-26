@@ -136,7 +136,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** avaliar a meta de 10.000 requisições por minuto e registrar os limites medidos.
 
-**Status:** há cenário isolado de transferências concorrentes com validação contábil, observação limitada do LOH e um script de demonstração Pix. Permanecem pendentes carga sustentada por rede real, carga de Pix e workers, percentis de latência e testes de falhas e recuperação durante a carga.
+**Status:** há cenário isolado de transferências concorrentes com validação contábil, observação limitada do LOH e um script de demonstração Pix. Outro cenário usa Kestrel local e worker com tráfego sustentado durante a interrupção e recuperação do RabbitMQ; seus limites e resultados estão no README. Permanecem pendentes carga de Pix e simulador, testes com processos separados e rede representativa, percentis de latência e outras falhas durante a carga.
 
 - Criar cenários de carga reproduzíveis para taxa média e picos.
 - Separar carga de entrada na API de capacidade do simulador e vazão dos workers.

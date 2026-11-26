@@ -310,6 +310,18 @@ O cenário usa TestServer no próprio processo, até oito requisições concorre
 
 Referência local de 26/11/2026: Windows 10.0.26200, Intel i5-1334U, SDK .NET 10.0.101, Docker Engine 29.8.2, PostgreSQL 18 Alpine; 1.000 transferências em 18,95 segundos, média extrapolada de 3.167/min, LOH observado de 885.152 para 1.376.944 bytes. Não é uma garantia nem valida a meta de 10.000/min. A medição inclui o processo de teste e depende de GC, máquina e ambiente.
 
+Para exercitar tráfego durante uma queda e recuperação do RabbitMQ, execute separadamente:
+
+```powershell
+$env:COREBANKING_RECOVERY_SECONDS = '60'
+dotnet test .\tests\CoreBanking.IntegrationTests --filter 'FullyQualifiedName~RecoveryLoadTests' --logger 'console;verbosity=detailed'
+Remove-Item Env:\COREBANKING_RECOVERY_SECONDS
+```
+
+Esse cenário usa containers temporários de PostgreSQL e RabbitMQ, HTTP loopback via Kestrel e um worker real no processo de teste. Quatro produtores em ciclo fechado aguardam 200 ms após cada resposta; o teste interrompe o RabbitMQ, confirma transferências e Outbox pendente durante a interrupção, reinicia o broker, continua o tráfego e aguarda a drenagem integral da Outbox para a Inbox. Verifica contagens, saldos e invariantes do ledger. A duração mínima do tráfego é configurável de 10 a 120 segundos; há teto de 5.000 operações e o limite de entrada é ajustado para 6.000/min. O processo de teste hospeda cliente, API e worker, com logs da API desativados e logger reduzido no worker. Não são medidos Pix, falhas do banco, percentis, pico do LOH ou capacidade de produção.
+
+Na mesma máquina de referência, com build Debug, 60,18 segundos de tráfego geraram 1.041 transferências; 7 foram observadas durante a interrupção, e drenagem e validação levaram 9,57 segundos após o tráfego. O LOH após o último GC observado foi de 754.024 para 852.432 bytes no processo inteiro. São observações de uma execução limitada e não estabelecem taxa máxima ou vazão sustentada de 10.000/min.
+
 ## API
 
 | Método | Endpoint | Finalidade |
