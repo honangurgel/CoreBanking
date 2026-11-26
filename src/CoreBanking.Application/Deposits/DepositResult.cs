@@ -13,6 +13,6 @@ public sealed record DepositResponse(DepositOutcome Outcome, DepositResult? Depo
 
 public interface IDepositService
 {
-    Task<DepositResponse> CreateAsync(Guid accountId, long amountMinor, string key, CancellationToken cancellationToken);
+    Task<DepositResponse> CreateAsync(Guid accountId, long amountMinor, string key, AuditActor actor, CancellationToken cancellationToken);
     Task<DepositResult?> FindAsync(Guid id, CancellationToken cancellationToken);
 }

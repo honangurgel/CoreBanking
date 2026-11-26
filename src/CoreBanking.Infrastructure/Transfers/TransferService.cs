@@ -1,3 +1,4 @@
+using CoreBanking.Application;
 using CoreBanking.Application.Transfers;
 using CoreBanking.Domain.Ledger;
 using CoreBanking.Infrastructure.Messaging;
@@ -13,7 +14,7 @@ public sealed class TransferService(BankingDbContext db) : ITransferService
         return transfer is null ? null : ToResult(transfer);
     }
 
-    public async Task<TransferResponse> CreateAsync(Guid sourceAccountId, Guid destinationAccountId, long amountMinor, string key, CancellationToken cancellationToken)
+    public async Task<TransferResponse> CreateAsync(Guid sourceAccountId, Guid destinationAccountId, long amountMinor, string key, AuditActor actor, CancellationToken cancellationToken)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var id = Guid.NewGuid();
@@ -60,6 +61,7 @@ public sealed class TransferService(BankingDbContext db) : ITransferService
         {
             await db.Database.ExecuteSqlInterpolatedAsync(
                 $"UPDATE \"Transfers\" SET \"Status\" = {"InsufficientFunds"} WHERE \"Id\" = {id}", cancellationToken);
+            await OperationAuditWriter.WriteAsync(db, actor, "Transfer", "InsufficientFunds", id, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return new TransferResponse(TransferOutcome.InsufficientFunds, new TransferResult(id, sourceAccountId, destinationAccountId, amountMinor, "InsufficientFunds", now));
         }
@@ -71,6 +73,7 @@ public sealed class TransferService(BankingDbContext db) : ITransferService
             $"UPDATE \"Transfers\" SET \"Status\" = {"Completed"}, \"LedgerEntryId\" = {entry.Id} WHERE \"Id\" = {id}", cancellationToken);
         db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), TransferId = id, CreatedAt = now });
         await db.SaveChangesAsync(cancellationToken);
+        await OperationAuditWriter.WriteAsync(db, actor, "Transfer", "Completed", id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new TransferResponse(TransferOutcome.Completed, new TransferResult(id, sourceAccountId, destinationAccountId, amountMinor, "Completed", now));
     }

@@ -14,6 +14,6 @@ public sealed record TransferResponse(TransferOutcome Outcome, TransferResult? T
 
 public interface ITransferService
 {
-    Task<TransferResponse> CreateAsync(Guid sourceAccountId, Guid destinationAccountId, long amountMinor, string key, CancellationToken cancellationToken);
+    Task<TransferResponse> CreateAsync(Guid sourceAccountId, Guid destinationAccountId, long amountMinor, string key, AuditActor actor, CancellationToken cancellationToken);
     Task<TransferResult?> FindAsync(Guid id, CancellationToken cancellationToken);
 }

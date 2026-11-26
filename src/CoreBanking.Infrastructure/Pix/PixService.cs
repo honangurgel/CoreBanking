@@ -1,3 +1,4 @@
+using CoreBanking.Application;
 using CoreBanking.Application.Pix;
 using CoreBanking.Domain.Ledger;
 using Microsoft.EntityFrameworkCore;
@@ -40,7 +41,7 @@ public sealed class PixService(BankingDbContext db) : IPixService
         return new PixReceipt(ToResult(operation), operation.ReservationEntryId, operation.SettlementEntryId, transitions);
     }
 
-    public async Task<PixResponse> CreateAsync(PixRequest request, string key, CancellationToken cancellationToken)
+    public async Task<PixResponse> CreateAsync(PixRequest request, string key, AuditActor actor, CancellationToken cancellationToken)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({key}, 921743))", cancellationToken);
@@ -95,11 +96,12 @@ public sealed class PixService(BankingDbContext db) : IPixService
         }
         AddTransition(db, operation);
         await db.SaveChangesAsync(cancellationToken);
+        await OperationAuditWriter.WriteAsync(db, actor, "PixCreate", operation.Status, id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new(operation.Status == "InsufficientFunds" ? PixOutcome.InsufficientFunds : PixOutcome.Accepted, ToResult(operation));
     }
 
-    public async Task<bool> RetryAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<bool> RetryAsync(Guid id, AuditActor actor, CancellationToken cancellationToken)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var operation = await db.PixOperations.FromSqlInterpolated(
@@ -110,6 +112,7 @@ public sealed class PixService(BankingDbContext db) : IPixService
         operation.NextAttemptAt = await db.Database.SqlQueryRaw<DateTimeOffset>("SELECT now() AS \"Value\"").SingleAsync(cancellationToken);
         AddTransition(db, operation);
         await db.SaveChangesAsync(cancellationToken);
+        await OperationAuditWriter.WriteAsync(db, actor, "PixRetry", "Pending", id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return true;
     }

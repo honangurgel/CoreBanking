@@ -19,8 +19,8 @@ public interface IPixService
 {
     Task<Guid?> CreateKeyAsync(Guid accountId, CancellationToken cancellationToken);
     Task<PixKeyResult?> FindKeyAsync(Guid id, CancellationToken cancellationToken);
-    Task<PixResponse> CreateAsync(PixRequest request, string key, CancellationToken cancellationToken);
+    Task<PixResponse> CreateAsync(PixRequest request, string key, AuditActor actor, CancellationToken cancellationToken);
     Task<PixResult?> FindAsync(Guid id, CancellationToken cancellationToken);
     Task<PixReceipt?> FindReceiptAsync(Guid id, CancellationToken cancellationToken);
-    Task<bool> RetryAsync(Guid id, CancellationToken cancellationToken);
+    Task<bool> RetryAsync(Guid id, AuditActor actor, CancellationToken cancellationToken);
 }

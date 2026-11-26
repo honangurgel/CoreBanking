@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using CoreBanking.Application;
 using CoreBanking.Application.Pix;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Hosting;
@@ -80,6 +81,7 @@ public sealed class AuthorizationTests
                     options.ConfigurationManager = new StaticConfigurationManager<OpenIdConnectConfiguration>(config);
                 });
                 services.AddScoped<IPixService, StubPixService>();
+                services.AddScoped<IAccountStatementService, StubStatementService>();
             });
         });
         using var client = factory.CreateClient();
@@ -90,6 +92,7 @@ public sealed class AuthorizationTests
             (HttpMethod.Get, $"/api/v1/customers/{id}", "operador"),
             (HttpMethod.Post, "/api/v1/accounts", "operador"),
             (HttpMethod.Get, $"/api/v1/accounts/{id}", "operador"),
+            (HttpMethod.Get, $"/api/v1/accounts/{id}/statement", "operador"),
             (HttpMethod.Post, "/api/v1/pix/keys", "operador"),
             (HttpMethod.Get, $"/api/v1/pix/keys/{id}", "operador"),
             (HttpMethod.Get, $"/api/v1/transfers/{id}", "operador"),
@@ -126,6 +129,10 @@ public sealed class AuthorizationTests
         retry.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Token(key, "administrador"));
         using var retryResponse = await client.SendAsync(retry);
         Assert.Equal(HttpStatusCode.Accepted, retryResponse.StatusCode);
+        using var statement = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/accounts/{id}/statement");
+        statement.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Token(key, "operador"));
+        using var statementResponse = await client.SendAsync(statement);
+        Assert.Equal(HttpStatusCode.OK, statementResponse.StatusCode);
 
         using var wrongKeyRsa = RSA.Create(2048);
         var invalidTokens = new (string Token, HttpStatusCode Status)[]
@@ -149,16 +156,22 @@ public sealed class AuthorizationTests
     private static string Token(SecurityKey key, string role, string issuer = Issuer, string audience = Audience,
         DateTime? expires = null, string tokenType = "Bearer") =>
         new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(issuer, audience,
-            [new Claim("roles", role), new Claim("typ", tokenType)],
+            [new Claim("roles", role), new Claim("typ", tokenType), new Claim("sub", "operator-test")],
             expires: expires ?? DateTime.UtcNow.AddMinutes(5),
             signingCredentials: new SigningCredentials(key, SecurityAlgorithms.RsaSha256)));
 
+    private sealed class StubStatementService : IAccountStatementService
+    {
+        public Task<AccountStatement?> FindAsync(Guid accountId, int pageSize, StatementCursor? cursor, CancellationToken cancellationToken) =>
+            Task.FromResult<AccountStatement?>(new AccountStatement(accountId, "BRL", [], null));
+    }
+
     private sealed class StubPixService : IPixService
     {
-        public Task<bool> RetryAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<bool> RetryAsync(Guid id, AuditActor actor, CancellationToken cancellationToken) => Task.FromResult(true);
         public Task<Guid?> CreateKeyAsync(Guid accountId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<PixKeyResult?> FindKeyAsync(Guid id, CancellationToken cancellationToken) => throw new NotImplementedException();
-        public Task<PixResponse> CreateAsync(PixRequest request, string key, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<PixResponse> CreateAsync(PixRequest request, string key, AuditActor actor, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<PixResult?> FindAsync(Guid id, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<PixReceipt?> FindReceiptAsync(Guid id, CancellationToken cancellationToken) => throw new NotImplementedException();
     }

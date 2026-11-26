@@ -185,6 +185,24 @@ dotnet run --project .\src\CoreBanking.Api
 
 Envie `Authorization: Bearer <access-token>` nas rotas protegidas. HTTP para discovery só é aceito em `Development` e para loopback; nos demais ambientes a autoridade deve ser HTTPS. O Keycloak `start-dev`, sua base efêmera e o modo sem autenticação servem apenas para testes locais. Reiniciar a API com outro modo requer alterar as variáveis e reiniciar o processo.
 
+### Auditoria operacional
+
+Depósitos concluídos, transferências concluídas ou rejeitadas por saldo insuficiente, criação de Pix aceita ou rejeitada por saldo e reprocessamentos Pix aceitos geram eventos na tabela `OperationAuditEvents`. O evento é gravado na **mesma transação** da alteração: se a auditoria falhar, a operação é revertida. Não são criados eventos para repetições idempotentes, conflitos, validações inválidas, autenticação/autorização negada ou reprocessamentos recusados; também não são registrados os processamentos automáticos do worker. Operações anteriores à migration não recebem auditoria retroativa.
+
+Cada evento contém ação, resultado, ID da operação, data, ID da requisição e executor. Com OIDC são armazenados o emissor e o `sub` do token validado; operações sem um único `sub` e `iss` válidos são recusadas com `403`. No modo local sem autenticação, o executor é `LocalAnonymous`, sem identificação individual. Não são armazenados tokens, chave de idempotência, valores ou corpos de requisições. O `sub` pode identificar uma pessoa dependendo do provedor: use identidades fictícias e trate a tabela como dado restrito.
+
+Uma consulta administrativa no PostgreSQL pode filtrar uma operação fictícia, mantendo o resultado limitado:
+
+```sql
+SELECT "OccurredAt", "Action", "Outcome", "ActorKind", "Issuer", "Subject", "RequestId"
+FROM "OperationAuditEvents"
+WHERE "OperationId" = '<id-da-operacao>'::uuid
+ORDER BY "OccurredAt", "Id"
+LIMIT 100;
+```
+
+Não há endpoint de consulta de auditoria ou retenção automática. A tabela cresce no banco e requer política de retenção e manutenção privilegiada; não há buffer de histórico na aplicação. Triggers impedem `UPDATE`, `DELETE` e `TRUNCATE` comuns, e a reversão da migration é bloqueada se houver eventos. Isso não impede adulteração por um administrador do banco nem substitui controles de acesso, armazenamento imutável externo ou auditoria completa de segurança. A migration precisa ser aplicada antes de executar esta versão.
+
 ## Requisitos para desenvolvimento local
 
 Após a implementação da estrutura inicial, o ambiente de desenvolvimento deverá ter:
@@ -396,6 +414,7 @@ São valores de uma execução por cenário, sem rede representativa; não compr
 | `GET` | `/api/v1/customers/{customerId}` | Consultar cliente |
 | `POST` | `/api/v1/accounts` | Abrir conta |
 | `GET` | `/api/v1/accounts/{accountId}` | Consultar conta e saldo em centavos (`balanceMinor`, moeda `BRL`) |
+| `GET` | `/api/v1/accounts/{accountId}/statement` | Consultar extrato contábil paginado |
 | `POST` | `/api/v1/deposits` | Depósito fictício; corpo `accountId`, `amountMinor` |
 | `GET` | `/api/v1/deposits/{depositId}` | Consultar depósito |
 | `POST` | `/api/v1/transfers` | Transferência interna; corpo `sourceAccountId`, `destinationAccountId`, `amountMinor` |
@@ -407,7 +426,15 @@ São valores de uma execução por cenário, sem rede representativa; não compr
 | `GET` | `/api/v1/pix/operations/{id}/receipt` | Consultar comprovante Pix |
 | `POST` | `/api/v1/pix/operations/{id}/retry` | Reprocessar operação em revisão |
 
-Clientes, contas, depósitos e transferências criados retornam `201 Created`; operações Pix aceitas e reprocessamentos retornam `202 Accepted`. Entradas inválidas retornam `400`. A criação de cliente e conta ainda não implementa idempotência; extratos permanecem planejados.
+Clientes, contas, depósitos e transferências criados retornam `201 Created`; operações Pix aceitas e reprocessamentos retornam `202 Accepted`. Entradas inválidas retornam `400`. A criação de cliente e conta ainda não implementa idempotência.
+
+### Extrato contábil
+
+`GET /api/v1/accounts/{accountId}/statement` exige o perfil `operador` quando OIDC está ativo. Retorna `accountId`, `currency` (`BRL`), `items` e `nextCursor`; conta inexistente retorna `404`. Cada item contém `entryId`, `createdAt`, `description`, `amountMinor` e `reversesEntryId` (quando houver estorno). O valor positivo é crédito na conta e o negativo é débito; não há saldo após cada lançamento. Reservas e liberações Pix aparecem como partidas contábeis, enquanto operações sem lançamento confirmado não aparecem.
+
+`pageSize` é opcional, padrão 50 e limitado a 1–100. Para obter a página seguinte, use os dois campos de `nextCursor` como parâmetros `beforeCreatedAt` e `beforeEntryId`, codificando a data para URL. Ambos devem ser informados juntos; parâmetros inválidos retornam `400`. A última página tem `nextCursor: null`. A consulta ordena por data de criação e identificador, ambos decrescentes, e carrega no máximo `pageSize + 1` partidas na aplicação.
+
+O cursor não cria um snapshot entre requisições. Lançamentos confirmados depois de uma página podem ser omitidos se sua chave de ordenação ficar antes do cursor já percorrido; para vê-los, reinicie a consulta. A data é a criação do lançamento pela aplicação, não a hora de commit. O extrato não garante isolamento entre clientes. A migration adiciona índices para a consulta; o custo de ordenação no PostgreSQL depende do volume e do plano de execução.
 
 ## Testes
 

@@ -1,3 +1,4 @@
+using CoreBanking.Application;
 using CoreBanking.Application.Deposits;
 using CoreBanking.Domain.Ledger;
 using Microsoft.EntityFrameworkCore;
@@ -14,7 +15,7 @@ public sealed class DepositService(BankingDbContext db) : IDepositService
         return deposit is null ? null : ToResult(deposit);
     }
 
-    public async Task<DepositResponse> CreateAsync(Guid accountId, long amountMinor, string key, CancellationToken cancellationToken)
+    public async Task<DepositResponse> CreateAsync(Guid accountId, long amountMinor, string key, AuditActor actor, CancellationToken cancellationToken)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var id = Guid.NewGuid();
@@ -53,6 +54,7 @@ public sealed class DepositService(BankingDbContext db) : IDepositService
         await new LedgerWriter(db).PostWithinTransactionAsync(entry, cancellationToken);
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE \"Deposits\" SET \"LedgerEntryId\" = {entry.Id} WHERE \"Id\" = {id}", cancellationToken);
+        await OperationAuditWriter.WriteAsync(db, actor, "Deposit", "Completed", id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new DepositResponse(DepositOutcome.Completed, new DepositResult(id, accountId, amountMinor, now));
     }

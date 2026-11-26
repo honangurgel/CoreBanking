@@ -214,6 +214,17 @@ public sealed class PixTests : IAsyncLifetime
         Assert.False(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), unavailable, NullLogger.Instance, CancellationToken.None));
         using var retry = await client.PostAsync($"/api/v1/pix/operations/{result.Id}/retry", null);
         Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+        using var duplicateRetry = await client.PostAsync($"/api/v1/pix/operations/{result.Id}/retry", null);
+        Assert.Equal(HttpStatusCode.Conflict, duplicateRetry.StatusCode);
+        await using (var auditDb = CreateContext())
+        {
+            var audits = await auditDb.Database.SqlQuery<long>($"""
+                SELECT count(*) AS "Value" FROM "OperationAuditEvents"
+                WHERE "OperationId" = {result.Id} AND "Action" = 'PixRetry' AND "Outcome" = 'Pending'
+                  AND "ActorKind" = 'LocalAnonymous'
+                """).SingleAsync();
+            Assert.Equal(1, audits);
+        }
         Assert.Contains(logs.Entries, item => item.Category == "Program"
             && Equals(item.Properties.GetValueOrDefault("OperationId"), result.Id)
             && Equals(item.Properties.GetValueOrDefault("RetryAccepted"), true));

@@ -58,6 +58,7 @@ builder.Services.AddDbContext<BankingDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Banking")
         ?? throw new InvalidOperationException("Configure a conexão ConnectionStrings:Banking.")));
 builder.Services.AddScoped<IBankingRepository, BankingRepository>();
+builder.Services.AddScoped<IAccountStatementService, AccountStatementService>();
 builder.Services.AddScoped<ITransferService, TransferService>();
 builder.Services.AddScoped<IDepositService, DepositService>();
 builder.Services.AddScoped<IPixService, PixService>();
@@ -189,6 +190,21 @@ operators.MapGet("/accounts/{accountId:guid}", async (Guid accountId, IBankingRe
         : Results.Ok(new AccountResponse(details.Account.Id, details.Account.CustomerId, details.Account.Status.ToString(), details.Account.OpenedAt, details.BalanceMinor, "BRL"));
 });
 
+operators.MapGet("/accounts/{accountId:guid}/statement", async (
+    Guid accountId, int? pageSize, DateTimeOffset? beforeCreatedAt, Guid? beforeEntryId,
+    IAccountStatementService statements, CancellationToken cancellationToken) =>
+{
+    var size = pageSize ?? 50;
+    if (size is < 1 or > 100)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["pageSize"] = ["Informe um tamanho de página entre 1 e 100."] });
+    if (beforeCreatedAt.HasValue != beforeEntryId.HasValue || beforeEntryId == Guid.Empty)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["cursor"] = ["Informe beforeCreatedAt e beforeEntryId juntos, com identificador não vazio."] });
+
+    var cursor = beforeCreatedAt is { } time && beforeEntryId is { } id ? new StatementCursor(time, id) : null;
+    var statement = await statements.FindAsync(accountId, size, cursor, cancellationToken);
+    return statement is null ? Results.NotFound() : Results.Ok(statement);
+});
+
 finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, ITransferService transfers, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
@@ -203,7 +219,9 @@ finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest 
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["transfer"] = ["Informe contas distintas e um valor positivo em centavos."] });
     }
 
-    var result = await transfers.CreateAsync(request.SourceAccountId, request.DestinationAccountId, request.AmountMinor, keys[0]!, cancellationToken);
+    var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    var result = await transfers.CreateAsync(request.SourceAccountId, request.DestinationAccountId, request.AmountMinor, keys[0]!, actor, cancellationToken);
     if (result.Transfer is { } transfer)
         logger.LogInformation("Transferência {TransferId} retornou {Status} para requisição {RequestId}.",
             transfer.Id, transfer.Status, httpRequest.HttpContext.TraceIdentifier);
@@ -235,7 +253,9 @@ finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest ht
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["deposit"] = ["Informe uma conta e um valor positivo em centavos."] });
     }
 
-    var result = await deposits.CreateAsync(request.AccountId, request.AmountMinor, keys[0]!, cancellationToken);
+    var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    var result = await deposits.CreateAsync(request.AccountId, request.AmountMinor, keys[0]!, actor, cancellationToken);
     return result.Outcome switch
     {
         DepositOutcome.Completed => Results.Created($"/api/v1/deposits/{result.Deposit!.Id}", result.Deposit),
@@ -274,7 +294,9 @@ finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRe
         || request.Direction is not ("Outgoing" or "Incoming") || request.Scenario is not ("Confirm" or "Reject")
         || request.AmountMinor <= 0 || request.AmountMinor > PixRules.MaxAmountMinor)
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["pix"] = ["Informe conta, chave fictícia, instituição, direção, cenário e valor válidos."] });
-    var response = await pix.CreateAsync(request, keys[0]!, cancellationToken);
+    var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    var response = await pix.CreateAsync(request, keys[0]!, actor, cancellationToken);
     if (response.Operation is { } operation)
         logger.LogInformation("Pix {OperationId} retornou {Status} para requisição {RequestId}.",
             operation.Id, operation.Status, httpRequest.HttpContext.TraceIdentifier);
@@ -302,7 +324,9 @@ operators.MapGet("/pix/operations/{id:guid}/receipt", async (Guid id, IPixServic
 
 administrators.MapPost("/pix/operations/{id:guid}/retry", async (Guid id, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
-    var retried = await pix.RetryAsync(id, cancellationToken);
+    var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    var retried = await pix.RetryAsync(id, actor, cancellationToken);
     logger.LogInformation("Reprocessamento do Pix {OperationId}: {RetryAccepted}, requisição {RequestId}.",
         id, retried, httpRequest.HttpContext.TraceIdentifier);
     return retried

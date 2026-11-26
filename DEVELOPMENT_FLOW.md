@@ -122,7 +122,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** tornar falhas e gargalos detectáveis e o comportamento seguro para uma demonstração.
 
-**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências. Há métricas do worker, backlog persistido e mensagens prontas no RabbitMQ; tracing distribuído, idade das mensagens RabbitMQ e métricas contínuas de divergência contábil permanecem pendentes. A API suporta OIDC com perfis operacionais independentes e modo local de desenvolvimento sem autenticação. O isolamento entre clientes continua ausente; não é adequada à exposição pública.
+**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências. Há métricas do worker, backlog persistido e mensagens prontas no RabbitMQ; tracing distribuído, idade das mensagens RabbitMQ e métricas contínuas de divergência contábil permanecem pendentes. A API suporta OIDC com perfis operacionais independentes e modo local de desenvolvimento sem autenticação. Eventos operacionais de movimentação e reprocessamento são auditados transacionalmente, com escopo e limites descritos no README. O isolamento entre clientes continua ausente; não é adequada à exposição pública.
 
 - Adicionar logs estruturados e correlação de ponta a ponta por operação.
 - Instrumentar métricas de taxa, latência, tamanho/idade das filas, retries, falhas e divergência entre ledger e projeção.
@@ -153,7 +153,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 Ordem sugerida:
 
-1. Extrato paginado e consultas operacionais.
+1. Extrato paginado e consultas operacionais. **Status:** extrato contábil por conta com cursor e limite de página implementado; outras consultas operacionais permanecem pendentes.
 2. Cartão de débito/crédito virtual, autorização e fatura simuladas.
 3. Empréstimos fictícios, cronograma de parcelas e pagamentos.
 4. Poupança, investimentos e seguros apenas como simulações didáticas.
