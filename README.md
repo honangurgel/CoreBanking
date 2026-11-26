@@ -120,7 +120,9 @@ O lançamento exige ao menos duas contas distintas, valores não nulos e soma ze
 
 Uma conta contábil de saldo zero é criada na mesma transação da conta de cliente; uma migration cria contas contábeis para contas já existentes. A API consulta a projeção e permite depósitos e transferências internos fictícios. Depósitos utilizam uma conta interna de contrapartida. Transferências com saldo insuficiente são registradas como rejeitadas, sem lançamentos.
 
-Depósitos e transferências exigem o cabeçalho `Idempotency-Key` (até 128 caracteres, sem espaços nas extremidades). A chave é única por tipo de operação e é mantida sem expiração. Repetir dados idênticos retorna o mesmo resultado; repetir a chave com dados diferentes retorna `409`. Uma transferência rejeitada por saldo insuficiente mantém sua rejeição: uma nova tentativa exige outra chave. Contas inexistentes e entradas inválidas não reservam a chave.
+Depósitos, transferências e Pix exigem o cabeçalho `Idempotency-Key` (até 128 caracteres, sem espaços nas extremidades). O escopo é o tipo de operação e a conta, ou, para transferências, o par **ordenado** de contas de origem e destino. Dentro do mesmo escopo, repetir dados idênticos retorna o mesmo resultado; repetir a chave com outros dados retorna `409`. A chave é mantida sem expiração. Uma transferência ou Pix rejeitado por saldo insuficiente mantém sua rejeição: uma nova tentativa exige outra chave. Contas inexistentes e entradas inválidas não reservam a chave.
+
+Esse escopo substitui a unicidade global anterior: usar a mesma chave com outra conta ou outro par pode criar uma nova movimentação, inclusive ao alterar por engano origem ou destino em um retry. Clientes devem manter os dados da operação original em todas as tentativas e gerar chaves únicas. Operações anteriores continuam recuperáveis com sua conta ou par original. A reversão da migration de escopo falha sem apagar dados se existirem chaves iguais em escopos diferentes. Interrompa as versões antigas da API antes de aplicar a migration: elas não são compatíveis com os novos índices.
 
 Uma transferência concluída grava o evento na Outbox junto com o lançamento e a operação. O worker publica eventos persistentes com confirmação no RabbitMQ; um consumidor registra a Inbox antes de confirmar a mensagem, deduplicando entregas. Falhas de processamento explicitamente sinalizadas recebem até três tentativas por sequência de entrega, com atrasos de 1 e 2 segundos em filas quorum; após a terceira falha, a mensagem vai para `corebanking.transfers.failed`. Mensagens inválidas também vão diretamente para essa fila. Em falhas de infraestrutura, o worker registra o erro e tenta reconectar com atraso progressivo, sem consumir o limite de falhas de processamento.
 
@@ -148,7 +150,7 @@ Aumentar o número de workers não deve permitir exceder o limite configurado pa
 - Não usar CPFs, chaves Pix ou dados de cartões de pessoas reais. Dados de exemplo devem ser claramente identificados como fictícios e não devem ser usados para validar identidades reais.
 - O simulador externo não fará chamadas de rede ao BACEN nem a participantes do Pix.
 
-Os perfis HTTP e as portas do Compose usam loopback. Em `Development`, a configuração explícita `Authentication:Mode=Disabled` desativa a autenticação e rejeita conexões cujo endereço remoto não seja loopback; **não coloque um proxy na frente desse modo**, pois conexões encaminhadas podem parecer locais. Em outros ambientes, desativá-la é proibido e a API exige OIDC configurado. O simulador não tem autenticação. Mesmo com OIDC, não há isolamento por cliente, TLS obrigatório na API, nem garantias para produção: não exponha os serviços nem use dados reais. `/health` e `/health/ready` são anônimos; o último expõe o estado das dependências. O rate limit é local a cada instância.
+Os perfis HTTP e as portas do Compose usam loopback. Em `Development`, a configuração explícita `Authentication:Mode=Disabled` desativa a autenticação e rejeita conexões cujo endereço remoto não seja loopback; **não coloque um proxy na frente desse modo**, pois conexões encaminhadas podem parecer locais. Em outros ambientes, desativá-la é proibido e a API exige OIDC configurado. O simulador não tem autenticação. Mesmo com OIDC e vínculos de conta, clientes são globais para operadores, não há TLS obrigatório na API nem garantias para produção: não exponha os serviços nem use dados reais. `/health` e `/health/ready` são anônimos; o último expõe o estado das dependências. O rate limit é local a cada instância.
 
 Os valores padrão do Compose e exemplos no README são exclusivamente locais; alterá-los não torna o projeto adequado à produção. Arquivos `.env` e `.env.*` são ignorados pelo Git, exceto `.env.example`, que deve conter somente exemplos sem segredos. Revise logs e configurações antes de compartilhá-los, e não habilite o registro de dados sensíveis do EF Core. Não há política automatizada de retenção ou exclusão de dados fictícios; use uma base isolada para cada demonstração ou teste.
 
@@ -160,9 +162,9 @@ A API aceita access tokens JWT assinados com RS256 por um provedor OIDC, validan
 | --- | --- |
 | `operador` | Cadastro de clientes, contas e chaves Pix; todas as consultas |
 | `financeiro` | Criação de depósitos, transferências e operações Pix |
-| `administrador` | Reprocessamento de operações Pix |
+| `administrador` | Reprocessamento de operações Pix e gestão de vínculos de contas |
 
-Sem token válido, as rotas protegidas respondem `401`; sem o perfil exigido, `403`. Os perfis não limitam o acesso a contas específicas e não substituem segregação entre clientes, auditoria de identidade, gestão de credenciais ou proteção contra abuso.
+Sem token válido, as rotas protegidas respondem `401`; sem o perfil exigido, `403`. Além do perfil, as rotas de conta exigem o vínculo descrito abaixo. Os perfis e vínculos não substituem gestão de credenciais, proteção contra abuso ou segregação dos cadastros de clientes.
 
 Para experimentar com Keycloak local e gratuito, defina credenciais temporárias em variáveis de ambiente e execute o perfil opcional:
 
@@ -184,6 +186,28 @@ dotnet run --project .\src\CoreBanking.Api
 ```
 
 Envie `Authorization: Bearer <access-token>` nas rotas protegidas. HTTP para discovery só é aceito em `Development` e para loopback; nos demais ambientes a autoridade deve ser HTTPS. O Keycloak `start-dev`, sua base efêmera e o modo sem autenticação servem apenas para testes locais. Reiniciar a API com outro modo requer alterar as variáveis e reiniciar o processo.
+
+### Acesso a contas
+
+Em OIDC, o vínculo identifica uma conta pelo par exato `iss` e `sub` do access token validado. A abertura cria automaticamente o vínculo do operador que abriu a conta, na mesma transação da conta e do ledger. Contas preexistentes não recebem acesso automático. Cadastro e consulta de clientes continuam globais para operadores.
+
+Um administrador pode conceder ou revogar um vínculo, inclusive o próprio, sem vínculo prévio com a conta:
+
+```text
+POST /api/v1/accounts/{accountId}/access/grant
+POST /api/v1/accounts/{accountId}/access/revoke
+Content-Type: application/json
+
+{"issuer":"https://issuer.example/realms/corebanking","subject":"operador-ficticio"}
+```
+
+Use o emissor e subject exatos emitidos pelo provedor configurado. Concessões e revogações repetidas respondem `204` sem criar novo evento; conta inexistente responde `404`. Alterações efetivas são auditadas com executor e alvo na mesma transação; falha de auditoria reverte a alteração. `AccountAccessAudit` não permite alteração ou exclusão comuns; como a auditoria operacional, exige retenção e proteção administrativas e não impede adulteração por administrador do banco.
+
+Consultas de conta, extrato, depósitos e Pix, criações de depósito, chave ou operação Pix e reprocessamentos Pix exigem vínculo com a conta. Transferências, inclusive consultas e replays, exigem vínculo com origem **e** destino. Sem vínculo, a API responde `404`. Perfis continuam independentes, de modo que administrar vínculos não concede outros perfis.
+
+Uma requisição autorizada mantém um bloqueio compartilhado no vínculo até o fim da requisição; a revogação aguarda requisições que já adquiriram esse bloqueio. Quando ela é confirmada, novas verificações não aceitam o vínculo removido. Processamento assíncrono já aceito continua independentemente de revogação. A verificação usa uma segunda conexão PostgreSQL, em pool separado, durante a requisição; dimensione conexões e monitore contenção e timeouts. O bloqueio protege os endpoints da API, não acessos diretos ao banco ou chamadas internas aos serviços.
+
+No modo local `Disabled`, não há verificação ou criação automática de vínculo e a gestão de vínculos não está disponível. As migrations de acesso e escopo de idempotência devem ser aplicadas antes de usar esta versão.
 
 ### Auditoria operacional
 
@@ -278,7 +302,7 @@ Em `http://localhost:5272`, `GET /api/v1/institutions` apresenta um pequeno cat�
 
 O fluxo inicial implementa envio e recebimento **exclusivamente simulados**. O limite é R$ 999.999.999.999.999,99 por operação (99.999.999.999.999.999 centavos). Uma chave local fictícia é um UUID criado por `POST /api/v1/pix/keys`, com `{"accountId":"..."}`. Para recebimento é necessário informar uma chave criada para a conta; no envio, o UUID representa uma chave externa fictícia e não é consultado em nenhum diretório real.
 
-`POST /api/v1/pix/operations` exige `Idempotency-Key` (mesmas regras das transferências) e recebe `accountId`, `keyId`, `institutionIspb`, `direction` (`Outgoing` ou `Incoming`), `amountMinor` e `scenario` (`Confirm` ou `Reject`). Retorna `202` para operação aceita e o estado atual também nos replays; requisições com a mesma chave e dados diferentes retornam `409`. Saldo insuficiente é persistido e exige nova chave para tentar novamente. `GET /api/v1/pix/operations/{id}` consulta o estado; `GET /api/v1/pix/operations/{id}/receipt` traz os lançamentos e a trilha de estados, inclusive para operações não confirmadas.
+`POST /api/v1/pix/operations` exige `Idempotency-Key` e recebe `accountId`, `keyId`, `institutionIspb`, `direction` (`Outgoing` ou `Incoming`), `amountMinor` e `scenario` (`Confirm` ou `Reject`). Retorna `202` para operação aceita e o estado atual também nos replays; requisições com a mesma chave e conta, mas outros dados, retornam `409`. Saldo insuficiente é persistido e exige nova chave para tentar novamente. `GET /api/v1/pix/operations/{id}` consulta o estado; `GET /api/v1/pix/operations/{id}/receipt` traz os lançamentos e a trilha de estados, inclusive para operações não confirmadas.
 
 No envio, o lançamento de reserva reduz o saldo disponível da conta imediatamente e credita uma conta contábil interna; confirmação transfere a reserva para compensação fictícia, enquanto rejeição devolve o valor à conta. No recebimento, o crédito só ocorre após confirmação. Cada mudança de estado e lançamento é persistida atomicamente. O próprio registro `Pending` funciona como fila durável no PostgreSQL, independente da Outbox de transferências internas; workers usam bloqueios `SKIP LOCKED` para evitar processamento simultâneo. A chamada ao simulador é determinística para a mesma operação e pode ser repetida após interrupção.
 
@@ -434,7 +458,7 @@ Clientes, contas, depósitos e transferências criados retornam `201 Created`; o
 
 `pageSize` é opcional, padrão 50 e limitado a 1–100. Para obter a página seguinte, use os dois campos de `nextCursor` como parâmetros `beforeCreatedAt` e `beforeEntryId`, codificando a data para URL. Ambos devem ser informados juntos; parâmetros inválidos retornam `400`. A última página tem `nextCursor: null`. A consulta ordena por data de criação e identificador, ambos decrescentes, e carrega no máximo `pageSize + 1` partidas na aplicação.
 
-O cursor não cria um snapshot entre requisições. Lançamentos confirmados depois de uma página podem ser omitidos se sua chave de ordenação ficar antes do cursor já percorrido; para vê-los, reinicie a consulta. A data é a criação do lançamento pela aplicação, não a hora de commit. O extrato não garante isolamento entre clientes. A migration adiciona índices para a consulta; o custo de ordenação no PostgreSQL depende do volume e do plano de execução.
+O cursor não cria um snapshot entre requisições. Lançamentos confirmados depois de uma página podem ser omitidos se sua chave de ordenação ficar antes do cursor já percorrido; para vê-los, reinicie a consulta. A data é a criação do lançamento pela aplicação, não a hora de commit. O acesso ao extrato segue os vínculos de conta descritos acima. A migration adiciona índices para a consulta; o custo de ordenação no PostgreSQL depende do volume e do plano de execução.
 
 ## Testes
 

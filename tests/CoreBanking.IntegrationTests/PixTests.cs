@@ -260,8 +260,8 @@ public sealed class PixTests : IAsyncLifetime
             using var replay = await SubmitAsync(client, request, failedKey);
             Assert.Equal(HttpStatusCode.Conflict, replay.StatusCode);
             Assert.Equal(failed.Id, (await replay.Content.ReadFromJsonAsync<PixResult>())!.Id);
-            using var conflict = await SubmitAsync(client, request with { AccountId = Guid.NewGuid() }, failedKey);
-            Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+            using var unknownAccount = await SubmitAsync(client, request with { AccountId = Guid.NewGuid() }, failedKey);
+            Assert.Equal(HttpStatusCode.NotFound, unknownAccount.StatusCode);
             Assert.Equal(120, await BalanceAsync(client, account));
         }
         finally

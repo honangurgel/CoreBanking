@@ -113,7 +113,7 @@ namespace CoreBanking.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("IdempotencyKey")
+                    b.HasIndex("AccountId", "IdempotencyKey")
                         .IsUnique();
 
                     b.ToTable("Deposits", null, t =>
@@ -237,9 +237,7 @@ namespace CoreBanking.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("AccountId");
-
-                    b.HasIndex("IdempotencyKey")
+                    b.HasIndex("AccountId", "IdempotencyKey")
                         .IsUnique();
 
                     b.HasIndex("Status", "NextAttemptAt");
@@ -317,8 +315,9 @@ namespace CoreBanking.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("IdempotencyKey")
-                        .IsUnique();
+                    b.HasIndex("SourceAccountId", "DestinationAccountId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("IX_Transfers_AccountPair_IdempotencyKey");
 
                     b.ToTable("Transfers", null, t =>
                         {

@@ -52,7 +52,7 @@ public sealed class LedgerBackfillMigrationTests : IAsyncLifetime
         var account = Account.Open(Guid.NewGuid());
 
         await Assert.ThrowsAsync<DbUpdateException>(() =>
-            new BankingRepository(db).AddAccountAsync(account, CancellationToken.None));
+            new BankingRepository(db).AddAccountAsync(account, CoreBanking.Application.AuditActor.Local("migration-test"), CancellationToken.None));
 
         await using var verification = new BankingDbContext(options);
         Assert.False(await verification.Accounts.AnyAsync(item => item.Id == account.Id));

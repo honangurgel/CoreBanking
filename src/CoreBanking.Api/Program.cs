@@ -59,6 +59,7 @@ builder.Services.AddDbContext<BankingDbContext>(options =>
         ?? throw new InvalidOperationException("Configure a conexão ConnectionStrings:Banking.")));
 builder.Services.AddScoped<IBankingRepository, BankingRepository>();
 builder.Services.AddScoped<IAccountStatementService, AccountStatementService>();
+builder.Services.AddScoped<IAccountAccess, AccountAccessService>();
 builder.Services.AddScoped<ITransferService, TransferService>();
 builder.Services.AddScoped<IDepositService, DepositService>();
 builder.Services.AddScoped<IPixService, PixService>();
@@ -116,6 +117,12 @@ if (authMode == "Oidc")
 var operators = app.MapGroup("/api/v1");
 var finance = app.MapGroup("/api/v1");
 var administrators = app.MapGroup("/api/v1");
+async Task<bool> CanAccessAsync(HttpContext context, IAccountAccess access, Guid accountId, CancellationToken cancellationToken)
+{
+    if (authMode == "Disabled") return true;
+    var actor = AuditActorResolver.Resolve(context, false);
+    return actor is not null && await access.HasAccessAsync(actor, accountId, cancellationToken);
+}
 if (authMode == "Oidc")
 {
     operators.RequireAuthorization("operador");
@@ -165,7 +172,7 @@ operators.MapGet("/customers/{customerId:guid}", async (Guid customerId, IBankin
     return customer is null ? Results.NotFound() : Results.Ok(customer);
 });
 
-operators.MapPost("/accounts", async (OpenAccountRequest request, IBankingRepository repository, CancellationToken cancellationToken) =>
+operators.MapPost("/accounts", async (OpenAccountRequest request, HttpContext context, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
     if (request.CustomerId == Guid.Empty)
     {
@@ -178,12 +185,15 @@ operators.MapPost("/accounts", async (OpenAccountRequest request, IBankingReposi
     }
 
     var account = Account.Open(request.CustomerId);
-    await repository.AddAccountAsync(account, cancellationToken);
+    var actor = AuditActorResolver.Resolve(context, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    await repository.AddAccountAsync(account, actor, cancellationToken);
     return Results.Created($"/api/v1/accounts/{account.Id}", new AccountResponse(account.Id, account.CustomerId, account.Status.ToString(), account.OpenedAt, 0, "BRL"));
 });
 
-operators.MapGet("/accounts/{accountId:guid}", async (Guid accountId, IBankingRepository repository, CancellationToken cancellationToken) =>
+operators.MapGet("/accounts/{accountId:guid}", async (Guid accountId, HttpContext context, IAccountAccess access, IBankingRepository repository, CancellationToken cancellationToken) =>
 {
+    if (!await CanAccessAsync(context, access, accountId, cancellationToken)) return Results.NotFound();
     var details = await repository.FindAccountAsync(accountId, cancellationToken);
     return details is null
         ? Results.NotFound()
@@ -192,7 +202,7 @@ operators.MapGet("/accounts/{accountId:guid}", async (Guid accountId, IBankingRe
 
 operators.MapGet("/accounts/{accountId:guid}/statement", async (
     Guid accountId, int? pageSize, DateTimeOffset? beforeCreatedAt, Guid? beforeEntryId,
-    IAccountStatementService statements, CancellationToken cancellationToken) =>
+    HttpContext context, IAccountAccess access, IAccountStatementService statements, CancellationToken cancellationToken) =>
 {
     var size = pageSize ?? 50;
     if (size is < 1 or > 100)
@@ -200,12 +210,13 @@ operators.MapGet("/accounts/{accountId:guid}/statement", async (
     if (beforeCreatedAt.HasValue != beforeEntryId.HasValue || beforeEntryId == Guid.Empty)
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["cursor"] = ["Informe beforeCreatedAt e beforeEntryId juntos, com identificador não vazio."] });
 
+    if (!await CanAccessAsync(context, access, accountId, cancellationToken)) return Results.NotFound();
     var cursor = beforeCreatedAt is { } time && beforeEntryId is { } id ? new StatementCursor(time, id) : null;
     var statement = await statements.FindAsync(accountId, size, cursor, cancellationToken);
     return statement is null ? Results.NotFound() : Results.Ok(statement);
 });
 
-finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, ITransferService transfers, ILogger<Program> logger, CancellationToken cancellationToken) =>
+finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, IAccountAccess access, ITransferService transfers, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -221,6 +232,9 @@ finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest 
 
     var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
     if (actor is null) return Results.Forbid();
+    if (!await CanAccessAsync(httpRequest.HttpContext, access, request.SourceAccountId, cancellationToken)
+        || !await CanAccessAsync(httpRequest.HttpContext, access, request.DestinationAccountId, cancellationToken))
+        return Results.NotFound();
     var result = await transfers.CreateAsync(request.SourceAccountId, request.DestinationAccountId, request.AmountMinor, keys[0]!, actor, cancellationToken);
     if (result.Transfer is { } transfer)
         logger.LogInformation("Transferência {TransferId} retornou {Status} para requisição {RequestId}.",
@@ -235,13 +249,15 @@ finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest 
     };
 });
 
-operators.MapGet("/transfers/{transferId:guid}", async (Guid transferId, ITransferService transfers, CancellationToken cancellationToken) =>
+operators.MapGet("/transfers/{transferId:guid}", async (Guid transferId, HttpContext context, IAccountAccess access, ITransferService transfers, CancellationToken cancellationToken) =>
 {
     var transfer = await transfers.FindAsync(transferId, cancellationToken);
-    return transfer is null ? Results.NotFound() : Results.Ok(transfer);
+    if (transfer is null || !await CanAccessAsync(context, access, transfer.SourceAccountId, cancellationToken)
+        || !await CanAccessAsync(context, access, transfer.DestinationAccountId, cancellationToken)) return Results.NotFound();
+    return Results.Ok(transfer);
 });
 
-finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest httpRequest, IDepositService deposits, CancellationToken cancellationToken) =>
+finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest httpRequest, IAccountAccess access, IDepositService deposits, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -255,6 +271,7 @@ finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest ht
 
     var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
     if (actor is null) return Results.Forbid();
+    if (!await CanAccessAsync(httpRequest.HttpContext, access, request.AccountId, cancellationToken)) return Results.NotFound();
     var result = await deposits.CreateAsync(request.AccountId, request.AmountMinor, keys[0]!, actor, cancellationToken);
     return result.Outcome switch
     {
@@ -265,27 +282,30 @@ finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest ht
     };
 });
 
-operators.MapGet("/deposits/{depositId:guid}", async (Guid depositId, IDepositService deposits, CancellationToken cancellationToken) =>
+operators.MapGet("/deposits/{depositId:guid}", async (Guid depositId, HttpContext context, IAccountAccess access, IDepositService deposits, CancellationToken cancellationToken) =>
 {
     var deposit = await deposits.FindAsync(depositId, cancellationToken);
-    return deposit is null ? Results.NotFound() : Results.Ok(deposit);
+    if (deposit is null || !await CanAccessAsync(context, access, deposit.AccountId, cancellationToken)) return Results.NotFound();
+    return Results.Ok(deposit);
 });
 
-operators.MapPost("/pix/keys", async (CreatePixKeyRequest request, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapPost("/pix/keys", async (CreatePixKeyRequest request, HttpContext context, IAccountAccess access, IPixService pix, CancellationToken cancellationToken) =>
 {
     if (request.AccountId == Guid.Empty)
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["accountId"] = ["Informe uma conta."] });
+    if (!await CanAccessAsync(context, access, request.AccountId, cancellationToken)) return Results.NotFound();
     var key = await pix.CreateKeyAsync(request.AccountId, cancellationToken);
     return key is null ? Results.NotFound(new { message = "Conta não encontrada." }) : Results.Created($"/api/v1/pix/keys/{key}", new PixKeyResult(key.Value, request.AccountId));
 });
 
-operators.MapGet("/pix/keys/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapGet("/pix/keys/{id:guid}", async (Guid id, HttpContext context, IAccountAccess access, IPixService pix, CancellationToken cancellationToken) =>
 {
     var key = await pix.FindKeyAsync(id, cancellationToken);
-    return key is null ? Results.NotFound() : Results.Ok(key);
+    if (key is null || !await CanAccessAsync(context, access, key.AccountId, cancellationToken)) return Results.NotFound();
+    return Results.Ok(key);
 });
 
-finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
+finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRequest, IAccountAccess access, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -296,6 +316,7 @@ finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRe
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["pix"] = ["Informe conta, chave fictícia, instituição, direção, cenário e valor válidos."] });
     var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
     if (actor is null) return Results.Forbid();
+    if (!await CanAccessAsync(httpRequest.HttpContext, access, request.AccountId, cancellationToken)) return Results.NotFound();
     var response = await pix.CreateAsync(request, keys[0]!, actor, cancellationToken);
     if (response.Operation is { } operation)
         logger.LogInformation("Pix {OperationId} retornou {Status} para requisição {RequestId}.",
@@ -310,28 +331,49 @@ finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRe
     };
 });
 
-operators.MapGet("/pix/operations/{id:guid}", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapGet("/pix/operations/{id:guid}", async (Guid id, HttpContext context, IAccountAccess access, IPixService pix, CancellationToken cancellationToken) =>
 {
     var result = await pix.FindAsync(id, cancellationToken);
-    return result is null ? Results.NotFound() : Results.Ok(result);
+    if (result is null || !await CanAccessAsync(context, access, result.AccountId, cancellationToken)) return Results.NotFound();
+    return Results.Ok(result);
 });
 
-operators.MapGet("/pix/operations/{id:guid}/receipt", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
+operators.MapGet("/pix/operations/{id:guid}/receipt", async (Guid id, HttpContext context, IAccountAccess access, IPixService pix, CancellationToken cancellationToken) =>
 {
     var receipt = await pix.FindReceiptAsync(id, cancellationToken);
-    return receipt is null ? Results.NotFound() : Results.Ok(receipt);
+    if (receipt is null || !await CanAccessAsync(context, access, receipt.Operation.AccountId, cancellationToken)) return Results.NotFound();
+    return Results.Ok(receipt);
 });
 
-administrators.MapPost("/pix/operations/{id:guid}/retry", async (Guid id, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
+administrators.MapPost("/pix/operations/{id:guid}/retry", async (Guid id, HttpRequest httpRequest, IAccountAccess access, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
     if (actor is null) return Results.Forbid();
+    var operation = await pix.FindAsync(id, cancellationToken);
+    if (authMode != "Disabled" && (operation is null ||
+        !await CanAccessAsync(httpRequest.HttpContext, access, operation.AccountId, cancellationToken))) return Results.NotFound();
     var retried = await pix.RetryAsync(id, actor, cancellationToken);
     logger.LogInformation("Reprocessamento do Pix {OperationId}: {RetryAccepted}, requisição {RequestId}.",
         id, retried, httpRequest.HttpContext.TraceIdentifier);
     return retried
         ? Results.Accepted($"/api/v1/pix/operations/{id}")
         : Results.Conflict(new { message = "Operação inexistente ou fora de revisão." });
+});
+
+administrators.MapPost("/accounts/{accountId:guid}/access/{action}", async (
+    Guid accountId, string action, AccountAccessRequest request, HttpContext context,
+    IAccountAccess access, CancellationToken cancellationToken) =>
+{
+    if (authMode == "Disabled") return Results.NotFound();
+    var actor = AuditActorResolver.Resolve(context, false);
+    if (actor is null) return Results.Forbid();
+    if (action is not ("grant" or "revoke")) return Results.NotFound();
+    if (string.IsNullOrWhiteSpace(request.Issuer) || request.Issuer.Length > 512 ||
+        request.Issuer != request.Issuer.Trim() || string.IsNullOrWhiteSpace(request.Subject) ||
+        request.Subject.Length > 256 || request.Subject != request.Subject.Trim())
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["identity"] = ["Informe emissor e identificador válidos."] });
+    return await access.ChangeAsync(actor, accountId, request.Issuer, request.Subject, action == "grant", cancellationToken)
+        ? Results.NoContent() : Results.NotFound();
 });
 
 app.Run();
@@ -342,6 +384,7 @@ public sealed record AccountResponse(Guid Id, Guid CustomerId, string Status, Da
 public sealed record CreateTransferRequest(Guid SourceAccountId, Guid DestinationAccountId, long AmountMinor);
 public sealed record CreateDepositRequest(Guid AccountId, long AmountMinor);
 public sealed record CreatePixKeyRequest(Guid AccountId);
+public sealed record AccountAccessRequest(string? Issuer, string? Subject);
 
 public partial class Program
 {

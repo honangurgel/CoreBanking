@@ -36,10 +36,14 @@ public sealed class BankingRepository(BankingDbContext db) : IBankingRepository
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task AddAccountAsync(Account account, CancellationToken cancellationToken)
+    public async Task AddAccountAsync(Account account, AuditActor actor, CancellationToken cancellationToken)
     {
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         db.Accounts.Add(account);
         db.LedgerAccounts.Add(LedgerAccount.ForCustomer(account.Id));
         await db.SaveChangesAsync(cancellationToken);
+        if (actor.Kind == "Oidc")
+            await AccountAccessService.ChangeWithinTransactionAsync(db, actor, account.Id, actor.Issuer!, actor.Subject!, true, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 }

@@ -23,12 +23,14 @@ public sealed class TransferService(BankingDbContext db) : ITransferService
         var inserted = await db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO "Transfers" ("Id", "IdempotencyKey", "SourceAccountId", "DestinationAccountId", "AmountMinor", "Status", "CreatedAt")
             VALUES ({id}, {key}, {sourceAccountId}, {destinationAccountId}, {amountMinor}, {"Pending"}, {now})
-            ON CONFLICT ("IdempotencyKey") DO NOTHING
+            ON CONFLICT ("SourceAccountId", "DestinationAccountId", "IdempotencyKey") DO NOTHING
             """, cancellationToken);
 
         if (inserted == 0)
         {
-            var existing = await db.Transfers.AsNoTracking().SingleAsync(item => item.IdempotencyKey == key, cancellationToken);
+            var existing = await db.Transfers.AsNoTracking().SingleAsync(item =>
+                item.SourceAccountId == sourceAccountId && item.DestinationAccountId == destinationAccountId
+                && item.IdempotencyKey == key, cancellationToken);
             if (existing.SourceAccountId != sourceAccountId || existing.DestinationAccountId != destinationAccountId || existing.AmountMinor != amountMinor)
             {
                 return new TransferResponse(TransferOutcome.IdempotencyConflict, null);

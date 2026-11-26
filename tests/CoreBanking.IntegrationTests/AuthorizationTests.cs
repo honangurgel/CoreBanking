@@ -82,6 +82,7 @@ public sealed class AuthorizationTests
                 });
                 services.AddScoped<IPixService, StubPixService>();
                 services.AddScoped<IAccountStatementService, StubStatementService>();
+                services.AddScoped<IAccountAccess, StubAccountAccess>();
             });
         });
         using var client = factory.CreateClient();
@@ -102,7 +103,9 @@ public sealed class AuthorizationTests
             (HttpMethod.Post, "/api/v1/transfers", "financeiro"),
             (HttpMethod.Post, "/api/v1/deposits", "financeiro"),
             (HttpMethod.Post, "/api/v1/pix/operations", "financeiro"),
-            (HttpMethod.Post, $"/api/v1/pix/operations/{id}/retry", "administrador")
+            (HttpMethod.Post, $"/api/v1/pix/operations/{id}/retry", "administrador"),
+            (HttpMethod.Post, $"/api/v1/accounts/{id}/access/grant", "administrador"),
+            (HttpMethod.Post, $"/api/v1/accounts/{id}/access/revoke", "administrador")
         };
         foreach (var endpoint in endpoints)
         {
@@ -166,13 +169,20 @@ public sealed class AuthorizationTests
             Task.FromResult<AccountStatement?>(new AccountStatement(accountId, "BRL", [], null));
     }
 
+    private sealed class StubAccountAccess : IAccountAccess
+    {
+        public Task<bool> HasAccessAsync(AuditActor actor, Guid accountId, CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<bool> ChangeAsync(AuditActor actor, Guid accountId, string issuer, string subject, bool grant, CancellationToken cancellationToken) => Task.FromResult(true);
+    }
+
     private sealed class StubPixService : IPixService
     {
         public Task<bool> RetryAsync(Guid id, AuditActor actor, CancellationToken cancellationToken) => Task.FromResult(true);
         public Task<Guid?> CreateKeyAsync(Guid accountId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<PixKeyResult?> FindKeyAsync(Guid id, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<PixResponse> CreateAsync(PixRequest request, string key, AuditActor actor, CancellationToken cancellationToken) => throw new NotImplementedException();
-        public Task<PixResult?> FindAsync(Guid id, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<PixResult?> FindAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult<PixResult?>(new PixResult(id, Guid.NewGuid(), Guid.NewGuid(), "00000000", "Incoming", 1, "Confirm", "RequiresReview", DateTimeOffset.UtcNow));
         public Task<PixReceipt?> FindReceiptAsync(Guid id, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 }

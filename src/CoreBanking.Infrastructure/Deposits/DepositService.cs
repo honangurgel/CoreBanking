@@ -24,11 +24,12 @@ public sealed class DepositService(BankingDbContext db) : IDepositService
         var inserted = await db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO "Deposits" ("Id", "IdempotencyKey", "AccountId", "AmountMinor", "CreatedAt")
             VALUES ({id}, {key}, {accountId}, {amountMinor}, {now})
-            ON CONFLICT ("IdempotencyKey") DO NOTHING
+            ON CONFLICT ("AccountId", "IdempotencyKey") DO NOTHING
             """, cancellationToken);
         if (inserted == 0)
         {
-            var existing = await db.Deposits.AsNoTracking().SingleAsync(item => item.IdempotencyKey == key, cancellationToken);
+            var existing = await db.Deposits.AsNoTracking().SingleAsync(
+                item => item.AccountId == accountId && item.IdempotencyKey == key, cancellationToken);
             if (existing.AccountId != accountId || existing.AmountMinor != amountMinor)
             {
                 return new DepositResponse(DepositOutcome.IdempotencyConflict, null);

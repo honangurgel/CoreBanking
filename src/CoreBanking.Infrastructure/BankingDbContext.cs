@@ -56,7 +56,7 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
         modelBuilder.Entity<PixOperation>(entity =>
         {
             entity.HasKey(operation => operation.Id);
-            entity.HasIndex(operation => operation.IdempotencyKey).IsUnique();
+            entity.HasIndex(operation => new { operation.AccountId, operation.IdempotencyKey }).IsUnique();
             entity.HasIndex(operation => new { operation.Status, operation.NextAttemptAt });
             entity.Property(operation => operation.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(operation => operation.InstitutionIspb).HasMaxLength(8).IsRequired();
@@ -83,7 +83,8 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
         modelBuilder.Entity<TransferRecord>(entity =>
         {
             entity.HasKey(transfer => transfer.Id);
-            entity.HasIndex(transfer => transfer.IdempotencyKey).IsUnique();
+            entity.HasIndex(transfer => new { transfer.SourceAccountId, transfer.DestinationAccountId, transfer.IdempotencyKey })
+                .HasDatabaseName("IX_Transfers_AccountPair_IdempotencyKey").IsUnique();
             entity.Property(transfer => transfer.IdempotencyKey).HasMaxLength(128).IsRequired();
             entity.Property(transfer => transfer.Status).HasMaxLength(32).IsRequired();
             entity.ToTable("Transfers", table =>
@@ -108,7 +109,7 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
             modelBuilder.Entity<DepositRecord>(entity =>
             {
                 entity.HasKey(deposit => deposit.Id);
-                entity.HasIndex(deposit => deposit.IdempotencyKey).IsUnique();
+                entity.HasIndex(deposit => new { deposit.AccountId, deposit.IdempotencyKey }).IsUnique();
                 entity.Property(deposit => deposit.IdempotencyKey).HasMaxLength(128).IsRequired();
                 entity.ToTable("Deposits", table =>
                     table.HasCheckConstraint("CK_Deposits_Amount", "\"AmountMinor\" > 0"));

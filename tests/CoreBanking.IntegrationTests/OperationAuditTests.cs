@@ -170,6 +170,9 @@ public sealed class OperationAuditTests : IAsyncLifetime
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE \"PixOperations\" SET \"Status\" = {"RequiresReview"} WHERE \"Id\" = {pixId}");
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Token("synthetic-subject-2"));
+        using var access = await client.PostAsJsonAsync($"/api/v1/accounts/{account}/access/grant",
+            new { issuer = Issuer, subject = "synthetic-subject-2" });
+        Assert.Equal(HttpStatusCode.NoContent, access.StatusCode);
         using var retry = await client.PostAsync($"/api/v1/pix/operations/{pixId}/retry", null);
         Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
 

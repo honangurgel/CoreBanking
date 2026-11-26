@@ -44,8 +44,10 @@ public sealed class PixService(BankingDbContext db) : IPixService
     public async Task<PixResponse> CreateAsync(PixRequest request, string key, AuditActor actor, CancellationToken cancellationToken)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({key}, 921743))", cancellationToken);
-        var existing = await db.PixOperations.AsNoTracking().SingleOrDefaultAsync(item => item.IdempotencyKey == key, cancellationToken);
+        var scopedKey = $"{request.AccountId:D}:{key}";
+        await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({scopedKey}, 921743))", cancellationToken);
+        var existing = await db.PixOperations.AsNoTracking().SingleOrDefaultAsync(
+            item => item.AccountId == request.AccountId && item.IdempotencyKey == key, cancellationToken);
         if (existing is not null)
             return ExistingResponse(existing, request);
 
@@ -63,11 +65,12 @@ public sealed class PixService(BankingDbContext db) : IPixService
                 "AmountMinor", "Scenario", "Status", "CreatedAt", "Attempts", "NextAttemptAt")
             VALUES ({id}, {key}, {request.AccountId}, {request.KeyId}, {request.InstitutionIspb}, {request.Direction},
                 {request.AmountMinor}, {request.Scenario}, {"Pending"}, {now}, {0}, now())
-            ON CONFLICT ("IdempotencyKey") DO NOTHING
+            ON CONFLICT ("AccountId", "IdempotencyKey") DO NOTHING
             """, cancellationToken);
         if (inserted == 0)
         {
-            var concurrent = await db.PixOperations.AsNoTracking().SingleAsync(item => item.IdempotencyKey == key, cancellationToken);
+            var concurrent = await db.PixOperations.AsNoTracking().SingleAsync(
+                item => item.AccountId == request.AccountId && item.IdempotencyKey == key, cancellationToken);
             return ExistingResponse(concurrent, request);
         }
 
