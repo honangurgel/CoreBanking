@@ -134,7 +134,8 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             .AddDbContext<BankingDbContext>(options => options.UseNpgsql(postgres.GetConnectionString()))
             .AddScoped<CoreBanking.Worker.ITransferEventProcessor, CoreBanking.Worker.TransferEventProcessor>()
             .BuildServiceProvider();
-        using var loggerFactory = LoggerFactory.Create(_ => { });
+        using var logs = new RecordingLogProvider();
+        using var loggerFactory = LoggerFactory.Create(logging => logging.AddProvider(logs));
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["RabbitMQ:ConnectionString"] = rabbit.GetConnectionString()
@@ -165,6 +166,14 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             }, worker);
             await using var verification = CreateContext();
             Assert.Equal(1, await verification.InboxMessages.CountAsync(item => item.Id == messageId));
+            Assert.Contains(logs.Entries, item =>
+                Equals(item.Properties.GetValueOrDefault("TransferId"), transferId)
+                && Equals(item.Properties.GetValueOrDefault("MessageId"), messageId)
+                && item.Properties.ContainsKey("Attempt"));
+            Assert.Contains(logs.Entries, item =>
+                Equals(item.Properties.GetValueOrDefault("TransferId"), transferId)
+                && Equals(item.Properties.GetValueOrDefault("MessageId"), messageId)
+                && !item.Properties.ContainsKey("Attempt"));
         }
         finally
         {

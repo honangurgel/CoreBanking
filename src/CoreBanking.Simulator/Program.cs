@@ -5,13 +5,14 @@ public static class SimulatorProgram
     public static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+        builder.Logging.AddConsole(options => options.FormatterName = "json");
         var app = builder.Build();
 
         app.MapGet("/health", () => Results.Ok(new { status = "Healthy", simulated = true }));
 
         app.MapGet("/api/v1/institutions", () => Results.Ok(InstitutionCatalog.All));
 
-        app.MapPost("/api/v1/settlements", async (SimulatedSettlementRequest request, CancellationToken cancellationToken) =>
+        app.MapPost("/api/v1/settlements", async (SimulatedSettlementRequest request, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
         {
             if (request.OperationId == Guid.Empty || request.KeyId == Guid.Empty || request.AmountMinor <= 0
                 || !InstitutionCatalog.Contains(request.InstitutionIspb)
@@ -26,14 +27,17 @@ public static class SimulatorProgram
             }
 
             await Task.Delay(request.DelayMilliseconds, cancellationToken);
+            var logger = loggerFactory.CreateLogger("CoreBanking.Simulator.Settlements");
             if (request.Scenario == "Unavailable")
             {
+                logger.LogWarning("Simulador indisponível para Pix {OperationId}.", request.OperationId);
                 return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
                     title: "Indisponibilidade simulada", detail: "Nenhuma liquidação real foi solicitada.");
             }
 
-            return Results.Ok(new SimulatedSettlementResult(request.OperationId,
-                request.Scenario == "Confirm" ? "Confirmed" : "Rejected", true));
+            var status = request.Scenario == "Confirm" ? "Confirmed" : "Rejected";
+            logger.LogInformation("Simulador retornou {Status} para Pix {OperationId}.", status, request.OperationId);
+            return Results.Ok(new SimulatedSettlementResult(request.OperationId, status, true));
         });
 
         app.Run();

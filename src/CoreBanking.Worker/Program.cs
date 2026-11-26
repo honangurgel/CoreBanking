@@ -5,6 +5,7 @@ using RabbitMQ.Client;
 
 var reprocessFailed = args.Length == 1 && args[0] == "--reprocess-failed";
 var builder = Host.CreateApplicationBuilder(reprocessFailed ? [] : args);
+builder.Logging.AddConsole(options => options.FormatterName = "json");
 if (reprocessFailed)
 {
     var uri = builder.Configuration["RabbitMQ:ConnectionString"]

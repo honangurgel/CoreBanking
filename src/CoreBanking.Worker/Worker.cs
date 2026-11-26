@@ -74,6 +74,8 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
         message.PublishedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        logger.LogInformation("Mensagem {MessageId} da transferência {TransferId} publicada na Outbox.",
+            message.Id, message.TransferId);
         return true;
     }
 
@@ -128,6 +130,7 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
             attempt = count;
         }
 
+        var handled = true;
         if (!await db.InboxMessages.AsNoTracking().AnyAsync(item => item.Id == message.MessageId, cancellationToken))
         {
             try
@@ -143,8 +146,8 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
                     2 => TransferQueues.SecondRetry,
                     _ => TransferQueues.Failed
                 };
-                logger.LogError(exception, "Falha ao processar mensagem {MessageId}, tentativa {Attempt}; destino {Destination}.",
-                    message.MessageId, attempt, destination);
+                logger.LogError(exception, "Falha ao processar mensagem {MessageId} da transferência {TransferId}, tentativa {Attempt}; destino {Destination}.",
+                    message.MessageId, message.TransferId, attempt, destination);
                 var properties = new BasicProperties
                 {
                     Persistent = true,
@@ -154,9 +157,13 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
                 };
                 await channel.BasicPublishAsync("", destination, mandatory: true, basicProperties: properties,
                     body: delivery.Body, cancellationToken: cancellationToken);
+                handled = false;
             }
         }
         await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
+        if (handled)
+            logger.LogInformation("Mensagem {MessageId} da transferência {TransferId} confirmada pela Inbox, tentativa {Attempt}.",
+                message.MessageId, message.TransferId, attempt);
         return true;
     }
 

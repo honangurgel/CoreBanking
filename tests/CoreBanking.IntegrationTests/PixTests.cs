@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Testcontainers.PostgreSql;
 
@@ -65,10 +66,13 @@ public sealed class PixTests : IAsyncLifetime
     [InlineData("Reject", 1000L, "Rejected")]
     public async Task Outgoing_ReservesAndFinalizesOnce(string scenario, long finalBalance, string status)
     {
-        using var api = CreateApi();
+        using var logs = new RecordingLogProvider();
+        using var api = CreateApi().WithWebHostBuilder(builder => builder.ConfigureLogging(logging => logging.AddProvider(logs)));
         using var client = api.CreateClient();
-        using var simulator = new WebApplicationFactory<SimulatorAssemblyMarker>();
+        using var simulator = new WebApplicationFactory<SimulatorAssemblyMarker>().WithWebHostBuilder(
+            builder => builder.ConfigureLogging(logging => logging.AddProvider(logs)));
         using var simulatorClient = simulator.CreateClient();
+        using var loggerFactory = LoggerFactory.Create(logging => logging.AddProvider(logs));
         await using var services = CreateServices();
         var account = await AccountAsync(client);
         await CreditAsync(client, account, 1000);
@@ -84,8 +88,8 @@ public sealed class PixTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
 
         var processing = await Task.WhenAll(
-            PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None),
-            PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
+            PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, loggerFactory.CreateLogger<PixWorker>(), CancellationToken.None),
+            PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, loggerFactory.CreateLogger<PixWorker>(), CancellationToken.None));
         Assert.Single(processing, processed => processed);
         Assert.False(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
         Assert.Equal(finalBalance, await BalanceAsync(client, account));
@@ -98,6 +102,15 @@ public sealed class PixTests : IAsyncLifetime
         await using var db = CreateContext();
         Assert.Equal(2, await db.PixTransitions.CountAsync(item => item.OperationId == result.Id));
         Assert.Equal(1, await db.PixOperations.CountAsync());
+        Assert.Contains(logs.Entries, item => item.Category == "Program"
+            && Equals(item.Properties.GetValueOrDefault("OperationId"), result.Id)
+            && item.Properties.ContainsKey("RequestId"));
+        Assert.Contains(logs.Entries, item => item.Category == "CoreBanking.Worker.PixWorker"
+            && Equals(item.Properties.GetValueOrDefault("OperationId"), result.Id)
+            && Equals(item.Properties.GetValueOrDefault("Status"), status));
+        Assert.Contains(logs.Entries, item => item.Category == "CoreBanking.Simulator.Settlements"
+            && Equals(item.Properties.GetValueOrDefault("OperationId"), result.Id)
+            && Equals(item.Properties.GetValueOrDefault("Status"), status));
     }
 
     [Fact]
@@ -128,11 +141,14 @@ public sealed class PixTests : IAsyncLifetime
     [Fact]
     public async Task Unavailable_EntersReviewWithReservationUntilManualRetry()
     {
-        using var api = CreateApi();
+        using var logs = new RecordingLogProvider();
+        using var api = CreateApi().WithWebHostBuilder(builder => builder.ConfigureLogging(logging => logging.AddProvider(logs)));
         using var client = api.CreateClient();
         using var simulator = new WebApplicationFactory<SimulatorAssemblyMarker>();
         using var simulatorClient = simulator.CreateClient();
         using var unavailable = new HttpClient(new UnavailableHandler()) { BaseAddress = new Uri("http://localhost/") };
+        using var loggerFactory = LoggerFactory.Create(logging => logging.AddProvider(logs));
+        var workerLogger = loggerFactory.CreateLogger<PixWorker>();
         await using var services = CreateServices();
         var account = await AccountAsync(client);
         await CreditAsync(client, account, 1000);
@@ -143,13 +159,20 @@ public sealed class PixTests : IAsyncLifetime
         {
             await using var db = CreateContext();
             await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE \"PixOperations\" SET \"NextAttemptAt\" = now() - interval '1 second' WHERE \"Id\" = {result.Id}");
-            Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), unavailable, NullLogger.Instance, CancellationToken.None));
+            Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), unavailable, workerLogger, CancellationToken.None));
         }
         Assert.Equal(600, await BalanceAsync(client, account));
         Assert.Equal("RequiresReview", (await client.GetFromJsonAsync<PixResult>($"/api/v1/pix/operations/{result.Id}"))!.Status);
         Assert.False(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), unavailable, NullLogger.Instance, CancellationToken.None));
         using var retry = await client.PostAsync($"/api/v1/pix/operations/{result.Id}/retry", null);
         Assert.Equal(HttpStatusCode.Accepted, retry.StatusCode);
+        Assert.Contains(logs.Entries, item => item.Category == "Program"
+            && Equals(item.Properties.GetValueOrDefault("OperationId"), result.Id)
+            && Equals(item.Properties.GetValueOrDefault("RetryAccepted"), true));
+        Assert.Contains(logs.Entries, item => item.Category == "CoreBanking.Worker.PixWorker"
+            && Equals(item.Properties.GetValueOrDefault("OperationId"), result.Id)
+            && Equals(item.Properties.GetValueOrDefault("Status"), "RequiresReview")
+            && Equals(item.Properties.GetValueOrDefault("Attempts"), 3));
         Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(), simulatorClient, NullLogger.Instance, CancellationToken.None));
         Assert.Equal("Confirmed", (await client.GetFromJsonAsync<PixResult>($"/api/v1/pix/operations/{result.Id}"))!.Status);
         Assert.Equal(600, await BalanceAsync(client, account));

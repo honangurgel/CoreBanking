@@ -15,6 +15,7 @@ using Microsoft.EntityFrameworkCore;
 using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Logging.AddConsole(options => options.FormatterName = "json");
 
 builder.Services.AddOpenApi();
 builder.Services.AddDbContext<BankingDbContext>(options =>
@@ -124,7 +125,7 @@ app.MapGet("/api/v1/accounts/{accountId:guid}", async (Guid accountId, IBankingR
         : Results.Ok(new AccountResponse(details.Account.Id, details.Account.CustomerId, details.Account.Status.ToString(), details.Account.OpenedAt, details.BalanceMinor, "BRL"));
 });
 
-app.MapPost("/api/v1/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, ITransferService transfers, CancellationToken cancellationToken) =>
+app.MapPost("/api/v1/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, ITransferService transfers, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -139,6 +140,9 @@ app.MapPost("/api/v1/transfers", async (CreateTransferRequest request, HttpReque
     }
 
     var result = await transfers.CreateAsync(request.SourceAccountId, request.DestinationAccountId, request.AmountMinor, keys[0]!, cancellationToken);
+    if (result.Transfer is { } transfer)
+        logger.LogInformation("Transferência {TransferId} retornou {Status} para requisição {RequestId}.",
+            transfer.Id, transfer.Status, httpRequest.HttpContext.TraceIdentifier);
     return result.Outcome switch
     {
         TransferOutcome.Completed => Results.Created($"/api/v1/transfers/{result.Transfer!.Id}", result.Transfer),
@@ -197,7 +201,7 @@ app.MapGet("/api/v1/pix/keys/{id:guid}", async (Guid id, IPixService pix, Cancel
     return key is null ? Results.NotFound() : Results.Ok(key);
 });
 
-app.MapPost("/api/v1/pix/operations", async (PixRequest request, HttpRequest httpRequest, IPixService pix, CancellationToken cancellationToken) =>
+app.MapPost("/api/v1/pix/operations", async (PixRequest request, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
     if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
         || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
@@ -207,6 +211,9 @@ app.MapPost("/api/v1/pix/operations", async (PixRequest request, HttpRequest htt
         || request.AmountMinor <= 0 || request.AmountMinor > PixRules.MaxAmountMinor)
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["pix"] = ["Informe conta, chave fictícia, instituição, direção, cenário e valor válidos."] });
     var response = await pix.CreateAsync(request, keys[0]!, cancellationToken);
+    if (response.Operation is { } operation)
+        logger.LogInformation("Pix {OperationId} retornou {Status} para requisição {RequestId}.",
+            operation.Id, operation.Status, httpRequest.HttpContext.TraceIdentifier);
     return response.Outcome switch
     {
         PixOutcome.Accepted => Results.Accepted($"/api/v1/pix/operations/{response.Operation!.Id}", response.Operation),
@@ -229,10 +236,15 @@ app.MapGet("/api/v1/pix/operations/{id:guid}/receipt", async (Guid id, IPixServi
     return receipt is null ? Results.NotFound() : Results.Ok(receipt);
 });
 
-app.MapPost("/api/v1/pix/operations/{id:guid}/retry", async (Guid id, IPixService pix, CancellationToken cancellationToken) =>
-    await pix.RetryAsync(id, cancellationToken)
+app.MapPost("/api/v1/pix/operations/{id:guid}/retry", async (Guid id, HttpRequest httpRequest, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
+{
+    var retried = await pix.RetryAsync(id, cancellationToken);
+    logger.LogInformation("Reprocessamento do Pix {OperationId}: {RetryAccepted}, requisição {RequestId}.",
+        id, retried, httpRequest.HttpContext.TraceIdentifier);
+    return retried
         ? Results.Accepted($"/api/v1/pix/operations/{id}")
-        : Results.Conflict(new { message = "Operação inexistente ou fora de revisão." }));
+        : Results.Conflict(new { message = "Operação inexistente ou fora de revisão." });
+});
 
 app.Run();
 

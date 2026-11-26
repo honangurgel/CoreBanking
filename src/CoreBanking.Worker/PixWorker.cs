@@ -159,6 +159,8 @@ public sealed class PixWorker(IServiceScopeFactory scopeFactory, IConfiguration 
 
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        logger.LogInformation("Pix {OperationId} processado com estado {Status} e {Attempts} falhas.",
+            operation.Id, operation.Status, operation.Attempts);
         return true;
     }
 

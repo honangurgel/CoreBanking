@@ -245,6 +245,12 @@ O simulador não persiste suas respostas nem representa BACEN, DICT ou liquidaç
 
 A API limita requisições por IP em janela fixa de um minuto, por instância, com padrão de 600 e resposta HTTP 429 sem fila. O valor pode ser alterado por `RateLimiting__PermitsPerMinute`; as rotas sob `/health` são isentas. Sem configuração confiável de proxy, o endereço observado pode ser compartilhado por vários clientes; não é um limite distribuído nem uma proteção de segurança.
 
+### Logs e correlação de operações
+
+API, worker e simulador emitem logs de console em JSON estruturado. Para acompanhar um Pix, busque `OperationId` (o `id` retornado pela API) nos logs da API, do worker e do simulador. Para transferências, busque `TransferId`; o worker também registra `MessageId` na publicação e no consumo, inclusive em falhas e reentregas. A API registra `RequestId` junto ao identificador retornado para vincular cada requisição à operação; replays idempotentes mantêm o mesmo identificador de operação. Reprocessamentos Pix registram se foram aceitos. Logs após processamento indicam o estado persistido, não garantem que uma linha foi emitida antes de uma interrupção.
+
+Esta é uma correlação por identificador de negócio, não tracing distribuído de spans. Não são registrados corpos, chaves de idempotência ou valores nos eventos adicionados; configure e proteja também os logs do framework e da infraestrutura. O projeto não armazena logs em banco nem em buffers próprios: configure coleta e retenção externamente. As mensagens registram apenas campos pequenos e não serializam payloads inteiros, mas o impacto no LOH e na vazão ainda precisa ser medido em testes de carga.
+
 ### Primeiro fluxo de uso
 
 Com a API em execução no perfil HTTP padrão (`http://localhost:5027`), crie um cliente e use o identificador retornado para abrir uma conta:

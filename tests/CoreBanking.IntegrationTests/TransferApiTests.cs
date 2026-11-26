@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Testcontainers.PostgreSql;
 
 namespace CoreBanking.IntegrationTests;
@@ -93,7 +94,8 @@ public sealed class TransferApiTests : IAsyncLifetime
     [Fact]
     public async Task RepeatedTransfer_ReturnsSameResultWithoutDuplicatingPostings()
     {
-        using var factory = CreateFactory();
+        using var logs = new RecordingLogProvider();
+        using var factory = CreateFactory().WithWebHostBuilder(builder => builder.ConfigureLogging(logging => logging.AddProvider(logs)));
         using var client = factory.CreateClient();
         var source = await OpenAccountAsync(client);
         var destination = await OpenAccountAsync(client);
@@ -108,6 +110,9 @@ public sealed class TransferApiTests : IAsyncLifetime
         var secondTransfer = await second.Content.ReadFromJsonAsync<Transfer>();
         Assert.NotNull(firstTransfer);
         Assert.Equal(firstTransfer, secondTransfer);
+        Assert.Contains(logs.Entries, item => item.Category == "Program"
+            && Equals(item.Properties.GetValueOrDefault("TransferId"), firstTransfer.Id)
+            && item.Properties.ContainsKey("RequestId"));
         using var conflict = await TransferAsync(client, "same-key", source, destination, 401);
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
 

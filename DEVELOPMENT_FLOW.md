@@ -122,7 +122,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** tornar falhas e gargalos detectáveis e o comportamento seguro para uma demonstração.
 
-**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados.
+**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências; tracing distribuído, métricas e medição de alocações e carga permanecem pendentes.
 
 - Adicionar logs estruturados e correlação de ponta a ponta por operação.
 - Instrumentar métricas de taxa, latência, tamanho/idade das filas, retries, falhas e divergência entre ledger e projeção.
