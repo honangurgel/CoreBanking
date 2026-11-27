@@ -2,6 +2,7 @@ using CoreBanking.Domain.Accounts;
 using CoreBanking.Domain.Customers;
 using CoreBanking.Domain.Ledger;
 using CoreBanking.Infrastructure.Deposits;
+using CoreBanking.Infrastructure.Cards;
 using CoreBanking.Infrastructure.Messaging;
 using CoreBanking.Infrastructure.Pix;
 using CoreBanking.Infrastructure.Transfers;
@@ -21,6 +22,8 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
     public DbSet<PixKey> PixKeys => Set<PixKey>();
     public DbSet<PixOperation> PixOperations => Set<PixOperation>();
     public DbSet<PixTransition> PixTransitions => Set<PixTransition>();
+    public DbSet<DebitCardRecord> DebitCards => Set<DebitCardRecord>();
+    public DbSet<DebitAuthorization> DebitAuthorizations => Set<DebitAuthorization>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -79,6 +82,33 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
             entity.HasKey(transition => transition.Id);
             entity.Property(transition => transition.Status).HasMaxLength(32).IsRequired();
             entity.HasOne<PixOperation>().WithMany().HasForeignKey(transition => transition.OperationId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<DebitCardRecord>(entity =>
+        {
+            entity.HasKey(card => card.Id);
+            entity.HasAlternateKey(card => new { card.Id, card.AccountId });
+            entity.HasIndex(card => new { card.AccountId, card.IdempotencyKey }).IsUnique();
+            entity.Property(card => card.IdempotencyKey).HasMaxLength(128).IsRequired();
+            entity.HasOne<Account>().WithMany().HasForeignKey(card => card.AccountId).OnDelete(DeleteBehavior.Restrict);
+        });
+        modelBuilder.Entity<DebitAuthorization>(entity =>
+        {
+            entity.HasKey(authorization => authorization.Id);
+            entity.HasIndex(authorization => new { authorization.AccountId, authorization.IdempotencyKey }).IsUnique();
+            entity.Property(authorization => authorization.IdempotencyKey).HasMaxLength(128).IsRequired();
+            entity.Property(authorization => authorization.Status).HasMaxLength(32).IsRequired();
+            entity.HasOne<DebitCardRecord>().WithMany()
+                .HasForeignKey(authorization => new { authorization.CardId, authorization.AccountId })
+                .HasPrincipalKey(card => new { card.Id, card.AccountId }).OnDelete(DeleteBehavior.Restrict);
+            entity.ToTable("DebitAuthorizations", table =>
+            {
+                table.HasCheckConstraint("CK_DebitAuthorizations_Amount", "\"AmountMinor\" > 0 AND \"AmountMinor\" <= 99999999999999999");
+                table.HasCheckConstraint("CK_DebitAuthorizations_State",
+                    "(\"Status\" = 'InsufficientFunds' AND \"ReservationEntryId\" IS NULL AND \"FinalizationEntryId\" IS NULL AND \"FinalizedAt\" IS NULL) " +
+                    "OR (\"Status\" = 'Authorized' AND \"ReservationEntryId\" IS NOT NULL AND \"FinalizationEntryId\" IS NULL AND \"FinalizedAt\" IS NULL) " +
+                    "OR (\"Status\" IN ('Settled', 'Cancelled') AND \"ReservationEntryId\" IS NOT NULL AND \"FinalizationEntryId\" IS NOT NULL AND \"FinalizedAt\" IS NOT NULL)");
+            });
         });
 
         modelBuilder.Entity<TransferRecord>(entity =>

@@ -122,7 +122,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** tornar falhas e gargalos detectáveis e o comportamento seguro para uma demonstração.
 
-**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências. Há métricas do worker, backlog persistido e mensagens prontas no RabbitMQ. A reconciliação de saldos é amostrada em lotes e emite métricas somente ao completar uma varredura. Tracing local opcional e tempo observado de entrega RabbitMQ foram implementados, sujeitos às limitações do README; o tempo observado não é a idade da mensagem mais antiga. A API suporta OIDC com perfis independentes, vínculos explícitos de conta e modo local de desenvolvimento sem autenticação. Eventos operacionais e alterações de vínculos são auditados transacionalmente. Clientes permanecem globais para operadores; a aplicação não é adequada à exposição pública.
+**Status:** a API expõe verificações de vida e prontidão para PostgreSQL, RabbitMQ e simulador. Elas não verificam o funcionamento dos workers ou a integridade dos dados. API, worker e simulador produzem logs estruturados correlacionáveis por identificadores de Pix e transferências. Há métricas do worker, backlog persistido e mensagens prontas no RabbitMQ, com exportação opcional para Prometheus, painel Grafana e regras locais sem notificações. A reconciliação de saldos é amostrada em lotes e emite métricas somente ao completar uma varredura. Tracing local opcional e tempo observado de entrega RabbitMQ foram implementados, sujeitos às limitações do README; o tempo observado não é a idade da mensagem mais antiga. O tracing foi validado no CI Linux, mas a política Code Integrity bloqueou uma DLL no Windows de desenvolvimento. A API suporta OIDC com perfis independentes, vínculos explícitos de conta e modo local de desenvolvimento sem autenticação. Eventos operacionais e alterações de vínculos são auditados transacionalmente. Clientes permanecem globais para operadores; a aplicação não é adequada à exposição pública.
 
 - Adicionar logs estruturados e correlação de ponta a ponta por operação.
 - Instrumentar métricas de taxa, latência, tamanho/idade das filas, retries, falhas e divergência entre ledger e projeção.
@@ -136,7 +136,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 
 **Objetivo:** avaliar a meta de 10.000 requisições por minuto e registrar os limites medidos.
 
-**Status:** há cenário isolado de transferências concorrentes e outro com tráfego durante a recuperação do RabbitMQ. A carga Pix usa processos separados, interrupção de simulador ou worker, percentis aproximados de aceitação e amostragem opcional de LOH após GC. Os resultados e suas limitações estão no README. Permanecem pendentes rede representativa, latência de liquidação e validação da meta de capacidade.
+**Status:** há cenário isolado de transferências concorrentes e outro com tráfego durante a recuperação do RabbitMQ. A carga Pix usa processos separados, interrupção de simulador ou worker, percentis aproximados de aceitação e amostragem opcional de LOH após GC. Uma execução moderada foi realizada com exportação de métricas ativa, sem tracing no Windows. Há demonstração isolada das imagens publicadas, com banco e broker próprios e API acessível somente no namespace local compartilhado. Os resultados e suas limitações estão no README. Permanecem pendentes rede representativa, latência de liquidação e validação da meta de capacidade.
 
 - Criar cenários de carga reproduzíveis para taxa média e picos.
 - Separar carga de entrada na API de capacidade do simulador e vazão dos workers.
@@ -154,7 +154,7 @@ Este documento define a sequência de implementação do CoreBanking. O objetivo
 Ordem sugerida:
 
 1. Extrato paginado e consultas operacionais. **Status:** extrato contábil por conta com cursor e limite de página implementado; outras consultas operacionais permanecem pendentes.
-2. Cartão de débito/crédito virtual, autorização e fatura simuladas.
+2. Cartão de débito/crédito virtual, autorização e fatura simuladas. **Status:** débito fictício com reserva sem expiração automática, liquidação integral ou cancelamento manual, idempotência e auditoria. Crédito, fatura, bloqueio e estorno de liquidação permanecem pendentes. A migration foi testada em banco temporário e aplicada ao banco local de desenvolvimento após backup validado.
 3. Empréstimos fictícios, cronograma de parcelas e pagamentos.
 4. Poupança, investimentos e seguros apenas como simulações didáticas.
 

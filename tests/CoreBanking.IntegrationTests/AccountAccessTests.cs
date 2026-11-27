@@ -123,6 +123,20 @@ public sealed class AccountAccessTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.NotFound, (await alice.GetAsync($"/api/v1/pix/operations/{pixId}/receipt")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await alice.PostAsync($"/api/v1/pix/operations/{pixId}/retry", null)).StatusCode);
 
+        using var card = await PostAsync(bob, "/api/v1/debit-cards", "bob-card", new { accountId = b });
+        Assert.Equal(HttpStatusCode.Created, card.StatusCode);
+        var cardId = (await card.Content.ReadFromJsonAsync<IdResponse>())!.Id;
+        using var deniedCard = await PostAsync(alice, "/api/v1/debit-cards", "alice-card", new { accountId = b });
+        Assert.Equal(HttpStatusCode.NotFound, deniedCard.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await alice.GetAsync($"/api/v1/debit-cards/{cardId}")).StatusCode);
+        using var deniedAuthorization = await PostAsync(alice, $"/api/v1/debit-cards/{cardId}/authorizations", "denied", new { amountMinor = 1 });
+        Assert.Equal(HttpStatusCode.NotFound, deniedAuthorization.StatusCode);
+        using var authorization = await PostAsync(bob, $"/api/v1/debit-cards/{cardId}/authorizations", "bob-purchase", new { amountMinor = 1 });
+        Assert.Equal(HttpStatusCode.Created, authorization.StatusCode);
+        var authorizationId = (await authorization.Content.ReadFromJsonAsync<IdResponse>())!.Id;
+        Assert.Equal(HttpStatusCode.NotFound, (await alice.GetAsync($"/api/v1/debit-authorizations/{authorizationId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await alice.PostAsync($"/api/v1/debit-authorizations/{authorizationId}/cancel", null)).StatusCode);
+
         Assert.Equal(HttpStatusCode.NoContent, await GrantAsync(admin, b, "alice", "grant"));
         Assert.Equal(HttpStatusCode.NoContent, await GrantAsync(admin, b, "alice", "grant"));
         using var sent = await PostAsync(alice, "/api/v1/transfers", "access-transfer", transfer);
@@ -131,6 +145,7 @@ public sealed class AccountAccessTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, (await alice.GetAsync($"/api/v1/transfers/{transferId}")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await bob.GetAsync($"/api/v1/transfers/{transferId}")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await alice.GetAsync($"/api/v1/pix/operations/{pixId}/receipt")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await alice.GetAsync($"/api/v1/debit-authorizations/{authorizationId}")).StatusCode);
 
         Assert.Equal(HttpStatusCode.NoContent, await GrantAsync(admin, b, "alice", "revoke"));
         Assert.Equal(HttpStatusCode.NoContent, await GrantAsync(admin, b, "alice", "revoke"));

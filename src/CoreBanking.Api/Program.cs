@@ -1,16 +1,19 @@
 ﻿using CoreBanking.Application;
 using CoreBanking.Application.Deposits;
+using CoreBanking.Application.Cards;
 using CoreBanking.Application.Pix;
 using CoreBanking.Application.Transfers;
 using CoreBanking.Domain.Accounts;
 using CoreBanking.Domain.Customers;
 using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Deposits;
+using CoreBanking.Infrastructure.Cards;
 using CoreBanking.Infrastructure.Pix;
 using CoreBanking.Infrastructure.Transfers;
 using CoreBanking.Api;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -67,6 +70,7 @@ builder.Services.AddScoped<IAccountAccess, AccountAccessService>();
 builder.Services.AddScoped<ITransferService, TransferService>();
 builder.Services.AddScoped<IDepositService, DepositService>();
 builder.Services.AddScoped<IPixService, PixService>();
+builder.Services.AddScoped<IDebitCardService, DebitCardService>();
 builder.Services.AddHealthChecks()
     .AddCheck<PostgresHealthCheck>("postgres", timeout: TimeSpan.FromSeconds(10))
     .AddCheck<RabbitMqHealthCheck>("rabbitmq", timeout: TimeSpan.FromSeconds(10))
@@ -127,6 +131,17 @@ async Task<bool> CanAccessAsync(HttpContext context, IAccountAccess access, Guid
     var actor = AuditActorResolver.Resolve(context, false);
     return actor is not null && await access.HasAccessAsync(actor, accountId, cancellationToken);
 }
+static string? IdempotencyKey(HttpRequest request)
+{
+    if (!request.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
+        || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
+        return null;
+    return keys[0];
+}
+static IResult InvalidIdempotencyKey() => Results.ValidationProblem(new Dictionary<string, string[]>
+{
+    ["Idempotency-Key"] = ["Informe uma chave única de 1 a 128 caracteres, sem espaços nas extremidades."]
+});
 if (authMode == "Oidc")
 {
     operators.RequireAuthorization("operador");
@@ -222,11 +237,8 @@ operators.MapGet("/accounts/{accountId:guid}/statement", async (
 
 finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest httpRequest, IAccountAccess access, ITransferService transfers, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
-    if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
-        || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
-    {
-        return Results.ValidationProblem(new Dictionary<string, string[]> { ["Idempotency-Key"] = ["Informe uma chave única de 1 a 128 caracteres, sem espaços nas extremidades."] });
-    }
+    var key = IdempotencyKey(httpRequest);
+    if (key is null) return InvalidIdempotencyKey();
 
     if (request.SourceAccountId == Guid.Empty || request.DestinationAccountId == Guid.Empty
         || request.SourceAccountId == request.DestinationAccountId || request.AmountMinor <= 0)
@@ -239,7 +251,7 @@ finance.MapPost("/transfers", async (CreateTransferRequest request, HttpRequest 
     if (!await CanAccessAsync(httpRequest.HttpContext, access, request.SourceAccountId, cancellationToken)
         || !await CanAccessAsync(httpRequest.HttpContext, access, request.DestinationAccountId, cancellationToken))
         return Results.NotFound();
-    var result = await transfers.CreateAsync(request.SourceAccountId, request.DestinationAccountId, request.AmountMinor, keys[0]!, actor, cancellationToken);
+    var result = await transfers.CreateAsync(request.SourceAccountId, request.DestinationAccountId, request.AmountMinor, key, actor, cancellationToken);
     if (result.Transfer is { } transfer)
         logger.LogInformation("Transferência {TransferId} retornou {Status} para requisição {RequestId}.",
             transfer.Id, transfer.Status, httpRequest.HttpContext.TraceIdentifier);
@@ -263,11 +275,8 @@ operators.MapGet("/transfers/{transferId:guid}", async (Guid transferId, HttpCon
 
 finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest httpRequest, IAccountAccess access, IDepositService deposits, CancellationToken cancellationToken) =>
 {
-    if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
-        || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
-    {
-        return Results.ValidationProblem(new Dictionary<string, string[]> { ["Idempotency-Key"] = ["Informe uma chave única de 1 a 128 caracteres, sem espaços nas extremidades."] });
-    }
+    var key = IdempotencyKey(httpRequest);
+    if (key is null) return InvalidIdempotencyKey();
     if (request.AccountId == Guid.Empty || request.AmountMinor <= 0)
     {
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["deposit"] = ["Informe uma conta e um valor positivo em centavos."] });
@@ -276,7 +285,7 @@ finance.MapPost("/deposits", async (CreateDepositRequest request, HttpRequest ht
     var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
     if (actor is null) return Results.Forbid();
     if (!await CanAccessAsync(httpRequest.HttpContext, access, request.AccountId, cancellationToken)) return Results.NotFound();
-    var result = await deposits.CreateAsync(request.AccountId, request.AmountMinor, keys[0]!, actor, cancellationToken);
+    var result = await deposits.CreateAsync(request.AccountId, request.AmountMinor, key, actor, cancellationToken);
     return result.Outcome switch
     {
         DepositOutcome.Completed => Results.Created($"/api/v1/deposits/{result.Deposit!.Id}", result.Deposit),
@@ -311,9 +320,8 @@ operators.MapGet("/pix/keys/{id:guid}", async (Guid id, HttpContext context, IAc
 
 finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRequest, IAccountAccess access, IPixService pix, ILogger<Program> logger, CancellationToken cancellationToken) =>
 {
-    if (!httpRequest.Headers.TryGetValue("Idempotency-Key", out var keys) || keys.Count != 1
-        || string.IsNullOrWhiteSpace(keys[0]) || keys[0]!.Length > 128 || keys[0] != keys[0]!.Trim())
-        return Results.ValidationProblem(new Dictionary<string, string[]> { ["Idempotency-Key"] = ["Informe uma chave única de 1 a 128 caracteres, sem espaços nas extremidades."] });
+    var key = IdempotencyKey(httpRequest);
+    if (key is null) return InvalidIdempotencyKey();
     if (request.AccountId == Guid.Empty || request.KeyId == Guid.Empty || !PixRules.IsInstitution(request.InstitutionIspb)
         || request.Direction is not ("Outgoing" or "Incoming") || request.Scenario is not ("Confirm" or "Reject")
         || request.AmountMinor <= 0 || request.AmountMinor > PixRules.MaxAmountMinor)
@@ -321,7 +329,7 @@ finance.MapPost("/pix/operations", async (PixRequest request, HttpRequest httpRe
     var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
     if (actor is null) return Results.Forbid();
     if (!await CanAccessAsync(httpRequest.HttpContext, access, request.AccountId, cancellationToken)) return Results.NotFound();
-    var response = await pix.CreateAsync(request, keys[0]!, actor, cancellationToken);
+    var response = await pix.CreateAsync(request, key, actor, cancellationToken);
     if (response.Operation is { } operation)
         logger.LogInformation("Pix {OperationId} retornou {Status} para requisição {RequestId}.",
             operation.Id, operation.Status, httpRequest.HttpContext.TraceIdentifier);
@@ -364,6 +372,83 @@ administrators.MapPost("/pix/operations/{id:guid}/retry", async (Guid id, HttpRe
         : Results.Conflict(new { message = "Operação inexistente ou fora de revisão." });
 });
 
+finance.MapPost("/debit-cards", async (CreateDebitCardRequest request, HttpRequest httpRequest, IAccountAccess access,
+    IDebitCardService cards, CancellationToken cancellationToken) =>
+{
+    var key = IdempotencyKey(httpRequest);
+    if (key is null) return InvalidIdempotencyKey();
+    if (request.AccountId == Guid.Empty)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["accountId"] = ["Informe uma conta."] });
+    var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    if (!await CanAccessAsync(httpRequest.HttpContext, access, request.AccountId, cancellationToken)) return Results.NotFound();
+    var response = await cards.IssueAsync(request.AccountId, key, actor, cancellationToken);
+    return response.Outcome switch
+    {
+        DebitCardOutcome.Created => Results.Created($"/api/v1/debit-cards/{response.Card!.Id}", response.Card),
+        DebitCardOutcome.NotFound => Results.NotFound(),
+        _ => throw new InvalidOperationException("Resultado de emissão de cartão desconhecido.")
+    };
+});
+
+operators.MapGet("/debit-cards/{id:guid}", async (Guid id, HttpContext context, IAccountAccess access,
+    IDebitCardService cards, CancellationToken cancellationToken) =>
+{
+    var card = await cards.FindCardAsync(id, cancellationToken);
+    if (card is null || !await CanAccessAsync(context, access, card.AccountId, cancellationToken)) return Results.NotFound();
+    return Results.Ok(card);
+});
+
+finance.MapPost("/debit-cards/{id:guid}/authorizations", async (Guid id, DebitAuthorizationRequest request,
+    HttpRequest httpRequest, IAccountAccess access, IDebitCardService cards, CancellationToken cancellationToken) =>
+{
+    var key = IdempotencyKey(httpRequest);
+    if (key is null) return InvalidIdempotencyKey();
+    if (request.AmountMinor <= 0 || request.AmountMinor > DebitCardRules.MaxAmountMinor)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["amountMinor"] = ["Informe um valor válido e positivo em centavos."] });
+    var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    var card = await cards.FindCardAsync(id, cancellationToken);
+    if (card is null || !await CanAccessAsync(httpRequest.HttpContext, access, card.AccountId, cancellationToken)) return Results.NotFound();
+    var response = await cards.AuthorizeAsync(id, request.AmountMinor, key, actor, cancellationToken);
+    return response.Outcome switch
+    {
+        DebitCardOutcome.Authorized => Results.Created($"/api/v1/debit-authorizations/{response.Authorization!.Id}", response.Authorization),
+        DebitCardOutcome.InsufficientFunds => Results.Conflict(response.Authorization),
+        DebitCardOutcome.Conflict => Results.Conflict(new { message = "A chave de idempotência já foi utilizada com outros dados." }),
+        DebitCardOutcome.NotFound => Results.NotFound(),
+        _ => throw new InvalidOperationException("Resultado de autorização de cartão desconhecido.")
+    };
+});
+
+operators.MapGet("/debit-authorizations/{id:guid}", async (Guid id, HttpContext context, IAccountAccess access,
+    IDebitCardService cards, CancellationToken cancellationToken) =>
+{
+    var authorization = await cards.FindAuthorizationAsync(id, cancellationToken);
+    if (authorization is null || !await CanAccessAsync(context, access, authorization.AccountId, cancellationToken)) return Results.NotFound();
+    return Results.Ok(authorization);
+});
+
+finance.MapPost("/debit-authorizations/{id:guid}/{action}", async (Guid id, string action, HttpRequest httpRequest,
+    IAccountAccess access, IDebitCardService cards, CancellationToken cancellationToken) =>
+{
+    if (action is not ("settle" or "cancel")) return Results.NotFound();
+    if (httpRequest.HttpContext.Features.Get<IHttpRequestBodyDetectionFeature>()?.CanHaveBody == true)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["body"] = ["A finalização não aceita corpo; a liquidação é sempre integral."] });
+    var actor = AuditActorResolver.Resolve(httpRequest.HttpContext, authMode == "Disabled");
+    if (actor is null) return Results.Forbid();
+    var authorization = await cards.FindAuthorizationAsync(id, cancellationToken);
+    if (authorization is null || !await CanAccessAsync(httpRequest.HttpContext, access, authorization.AccountId, cancellationToken)) return Results.NotFound();
+    var response = await cards.FinalizeAsync(id, action == "settle", actor, cancellationToken);
+    return response.Outcome switch
+    {
+        DebitCardOutcome.Settled or DebitCardOutcome.Cancelled => Results.Ok(response.Authorization),
+        DebitCardOutcome.Conflict => Results.Conflict(new { message = "Autorização fora do estado permitido." }),
+        DebitCardOutcome.NotFound => Results.NotFound(),
+        _ => throw new InvalidOperationException("Resultado de finalização de cartão desconhecido.")
+    };
+});
+
 administrators.MapPost("/accounts/{accountId:guid}/access/{action}", async (
     Guid accountId, string action, AccountAccessRequest request, HttpContext context,
     IAccountAccess access, CancellationToken cancellationToken) =>
@@ -388,6 +473,8 @@ public sealed record AccountResponse(Guid Id, Guid CustomerId, string Status, Da
 public sealed record CreateTransferRequest(Guid SourceAccountId, Guid DestinationAccountId, long AmountMinor);
 public sealed record CreateDepositRequest(Guid AccountId, long AmountMinor);
 public sealed record CreatePixKeyRequest(Guid AccountId);
+public sealed record CreateDebitCardRequest(Guid AccountId);
+public sealed record DebitAuthorizationRequest(long AmountMinor);
 public sealed record AccountAccessRequest(string? Issuer, string? Subject);
 
 public partial class Program
