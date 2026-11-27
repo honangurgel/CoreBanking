@@ -6,10 +6,13 @@ using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Messaging;
 using CoreBanking.Infrastructure.Transfers;
 using CoreBanking.Telemetry;
+using CoreBanking.Worker;
+using DotNet.Testcontainers.Builders;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using OpenTelemetry.Metrics;
 using RabbitMQ.Client;
 using Testcontainers.PostgreSql;
 using Testcontainers.RabbitMq;
@@ -46,6 +49,103 @@ public sealed class TracingConfigurationTests
         var services = new ServiceCollection();
         services.AddLocalTracing(config, "test", _ => throw new InvalidOperationException());
         Assert.Empty(services);
+    }
+}
+
+[Collection("Load scenarios")]
+public sealed class MetricsConfigurationTests
+{
+    [Theory]
+    [InlineData("http://example.com:9090")]
+    [InlineData("http://localhost:9090")]
+    [InlineData("https://127.0.0.1:9090")]
+    [InlineData("http://127.0.0.1:9090/path")]
+    [InlineData("http://127.0.0.1:9090/?token=secret")]
+    [InlineData("http://user:password@127.0.0.1:9090")]
+    public void EnabledMetrics_RejectsNonLocalOrUnsafeEndpoints(string endpoint)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Metrics:Enabled"] = "true",
+            ["Metrics:OtlpEndpoint"] = endpoint
+        }).Build();
+        Assert.Throws<InvalidOperationException>(() => new ServiceCollection().AddLocalWorkerMetrics(config));
+    }
+
+    [Fact]
+    public void DisabledMetrics_DoesNotConfigureExporter()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Metrics:OtlpEndpoint"] = "http://example.com"
+        }).Build();
+        var services = new ServiceCollection();
+        services.AddLocalWorkerMetrics(config);
+        Assert.Empty(services);
+    }
+
+    [Fact]
+    public async Task ExportsWorkerMetricsToPrometheus()
+    {
+        await using var prometheus = new ContainerBuilder("prom/prometheus:v3.7.3")
+            .WithCommand("--config.file=/etc/prometheus/prometheus.yml", "--web.enable-otlp-receiver")
+            .WithPortBinding(9090, true)
+            .WithWaitStrategy(Wait.ForUnixContainer().UntilHttpRequestIsSucceeded(
+                request => request.ForPort(9090).ForPath("/-/ready")))
+            .WithCreateParameterModifier(parameters =>
+            {
+                var bindings = parameters.HostConfig?.PortBindings
+                    ?? throw new InvalidOperationException("Porta do Prometheus não foi configurada.");
+                foreach (var binding in bindings.Values.SelectMany(value => value))
+                    binding.HostIP = "127.0.0.1";
+            })
+            .Build();
+        await prometheus.StartAsync();
+        var origin = $"http://127.0.0.1:{prometheus.GetMappedPublicPort(9090)}";
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Metrics:Enabled"] = "true",
+            ["Metrics:OtlpEndpoint"] = origin
+        }).Build();
+        var services = new ServiceCollection().AddLogging();
+        services.AddLocalWorkerMetrics(config);
+        using var provider = services.BuildServiceProvider();
+        provider.GetRequiredService<MeterProvider>();
+        WorkerMetrics.RecordBacklog("pix", 4, 321);
+        WorkerMetrics.RecordRabbitReady("transfer", 2);
+        WorkerMetrics.RecordLedgerReconciliation(5, 1, 100, 200);
+        WorkerMetrics.RecordTransfer("retry");
+        WorkerMetrics.RecordPix("Confirmed");
+        WorkerMetrics.RecordSimulatorDuration(0.2);
+        WorkerMetrics.RecordDeliveryAge(12);
+
+        using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(origin) };
+        var names = new[]
+        {
+            "corebanking_backlog_count", "corebanking_backlog_oldest_age_seconds",
+            "corebanking_rabbitmq_queue_ready", "corebanking_ledger_reconciliation_mismatches",
+            "corebanking_ledger_reconciliation_completed_seconds", "corebanking_transfer_messages_total",
+            "corebanking_pix_processed_total", "corebanking_pix_simulator_duration_seconds_bucket",
+            "corebanking_rabbitmq_delivery_age_seconds_bucket"
+        };
+        var clock = Stopwatch.StartNew();
+        while (true)
+        {
+            using var response = await client.GetAsync("/api/v1/label/__name__/values");
+            response.EnsureSuccessStatusCode();
+            using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+            var actual = json.RootElement.GetProperty("data").EnumerateArray().Select(value => value.GetString()).ToHashSet();
+            if (names.All(actual.Contains)) break;
+            if (clock.Elapsed > TimeSpan.FromSeconds(60))
+                throw new TimeoutException($"Métricas ausentes: {string.Join(", ", names.Where(name => !actual.Contains(name)))}");
+            await Task.Delay(1000);
+        }
+
+        using var backlog = await client.GetAsync("/api/v1/query?query=corebanking_backlog_count%7Bqueue%3D%22pix%22%7D");
+        backlog.EnsureSuccessStatusCode();
+        using var result = await JsonDocument.ParseAsync(await backlog.Content.ReadAsStreamAsync());
+        var series = Assert.Single(result.RootElement.GetProperty("data").GetProperty("result").EnumerateArray());
+        Assert.Equal("4", series.GetProperty("value")[1].GetString());
     }
 }
 

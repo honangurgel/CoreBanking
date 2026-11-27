@@ -27,31 +27,45 @@ public static class LocalTracing
         string serviceName, Action<TracerProviderBuilder> configure)
     {
         if (!configuration.GetValue<bool>("Tracing:Enabled")) return;
-        var endpoint = configuration["Tracing:OtlpEndpoint"] ?? "http://127.0.0.1:4317";
-        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp ||
-            !IPAddress.TryParse(uri.Host, out var host) || !IPAddress.IsLoopback(host) ||
-            !string.IsNullOrEmpty(uri.UserInfo) || uri.AbsolutePath != "/" ||
-            !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
-            throw new InvalidOperationException("Tracing:OtlpEndpoint deve ser uma origem HTTP em endereço IP loopback.");
+        var uri = LocalOtlp.Origin(configuration, "Tracing:OtlpEndpoint", "http://127.0.0.1:4317");
         services.AddOpenTelemetry().ConfigureResource(resource => resource.AddService(serviceName))
             .WithTracing(tracing =>
             {
                 configure(tracing);
                 tracing.AddOtlpExporter(options =>
                 {
-                    options.Endpoint = uri;
-                    options.Protocol = OtlpExportProtocol.Grpc;
-                    options.Headers = null;
+                    LocalOtlp.Configure(options, uri, OtlpExportProtocol.Grpc);
                     options.BatchExportProcessorOptions.MaxQueueSize = 256;
                     options.BatchExportProcessorOptions.MaxExportBatchSize = 64;
-                    options.MaxRequestSizeBytes = 750000;
-                    options.MaxResponseSizeBytes = 4096;
-                    options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
-                    {
-                        UseProxy = false,
-                        AllowAutoRedirect = false
-                    }) { MaxResponseContentBufferSize = 4096 };
                 });
             });
+    }
+}
+
+internal static class LocalOtlp
+{
+    public static Uri Origin(IConfiguration configuration, string key, string defaultValue)
+    {
+        var endpoint = configuration[key] ?? defaultValue;
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp ||
+            !IPAddress.TryParse(uri.Host, out var host) || !IPAddress.IsLoopback(host) ||
+            !string.IsNullOrEmpty(uri.UserInfo) || uri.AbsolutePath != "/" ||
+            !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+            throw new InvalidOperationException($"{key} deve ser uma origem HTTP em endereço IP loopback.");
+        return uri;
+    }
+
+    public static void Configure(OtlpExporterOptions options, Uri endpoint, OtlpExportProtocol protocol)
+    {
+        options.Endpoint = endpoint;
+        options.Protocol = protocol;
+        options.Headers = null;
+        options.MaxRequestSizeBytes = 750000;
+        options.MaxResponseSizeBytes = 4096;
+        options.HttpClientFactory = () => new HttpClient(new HttpClientHandler
+        {
+            UseProxy = false,
+            AllowAutoRedirect = false
+        }) { MaxResponseContentBufferSize = 4096 };
     }
 }

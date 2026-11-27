@@ -88,6 +88,83 @@ namespace CoreBanking.Infrastructure.Migrations
                         });
                 });
 
+            modelBuilder.Entity("CoreBanking.Infrastructure.Cards.DebitAuthorization", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("AmountMinor")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("CardId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("FinalizationEntryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("FinalizedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<Guid?>("ReservationEntryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.HasIndex("CardId", "AccountId");
+
+                    b.ToTable("DebitAuthorizations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_DebitAuthorizations_Amount", "\"AmountMinor\" > 0 AND \"AmountMinor\" <= 99999999999999999");
+
+                            t.HasCheckConstraint("CK_DebitAuthorizations_State", "(\"Status\" = 'InsufficientFunds' AND \"ReservationEntryId\" IS NULL AND \"FinalizationEntryId\" IS NULL AND \"FinalizedAt\" IS NULL) OR (\"Status\" = 'Authorized' AND \"ReservationEntryId\" IS NOT NULL AND \"FinalizationEntryId\" IS NULL AND \"FinalizedAt\" IS NULL) OR (\"Status\" IN ('Settled', 'Cancelled') AND \"ReservationEntryId\" IS NOT NULL AND \"FinalizationEntryId\" IS NOT NULL AND \"FinalizedAt\" IS NOT NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Cards.DebitCardRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "IdempotencyKey")
+                        .IsUnique();
+
+                    b.ToTable("DebitCards");
+                });
+
             modelBuilder.Entity("CoreBanking.Infrastructure.Deposits.DepositRecord", b =>
                 {
                     b.Property<Guid>("Id")
@@ -352,6 +429,25 @@ namespace CoreBanking.Infrastructure.Migrations
                         .WithOne()
                         .HasForeignKey("CoreBanking.Domain.Ledger.LedgerAccount", "CustomerAccountId")
                         .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Cards.DebitAuthorization", b =>
+                {
+                    b.HasOne("CoreBanking.Infrastructure.Cards.DebitCardRecord", null)
+                        .WithMany()
+                        .HasForeignKey("CardId", "AccountId")
+                        .HasPrincipalKey("Id", "AccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("CoreBanking.Infrastructure.Cards.DebitCardRecord", b =>
+                {
+                    b.HasOne("CoreBanking.Domain.Accounts.Account", null)
+                        .WithMany()
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("CoreBanking.Infrastructure.Messaging.InboxMessage", b =>

@@ -1,0 +1,74 @@
+{
+  "uid": "corebanking-worker",
+  "title": "CoreBanking - Worker",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Backlog por fila",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "max by (queue) (corebanking_backlog_count)", "legendFormat": "{{queue}}", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "title": "Idade do backlog mais antigo (s)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "max by (queue) (corebanking_backlog_oldest_age_seconds)", "legendFormat": "{{queue}}", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "title": "Transferências: eventos por segundo",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "sum by (outcome) (rate(corebanking_transfer_messages_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "title": "Pix: eventos por segundo",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "sum by (status) (rate(corebanking_pix_processed_total[5m]))", "legendFormat": "{{status}}", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "title": "Mensagens prontas no RabbitMQ",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "max by (queue) (corebanking_rabbitmq_queue_ready)", "legendFormat": "{{queue}}", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "title": "Reconciliação: divergências",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "max(corebanking_ledger_reconciliation_mismatches)", "refId": "A" }]
+    },
+    {
+      "id": 7,
+      "title": "Duração do simulador Pix p95 (s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(corebanking_pix_simulator_duration_seconds_bucket[5m])))", "refId": "A" }]
+    },
+    {
+      "id": 8,
+      "title": "Idade observada na entrega RabbitMQ p95 (s)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "corebanking-prometheus" },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(corebanking_rabbitmq_delivery_age_seconds_bucket[5m])))", "refId": "A" }]
+    }
+  ]
+}

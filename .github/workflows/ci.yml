@@ -29,6 +29,9 @@ jobs:
       - name: Test
         run: dotnet test CoreBanking.sln --no-build --configuration Release
 
+      - name: Test Prometheus alert rules
+        run: docker run --rm --entrypoint promtool --volume "$PWD/observability:/etc/prometheus:ro" prom/prometheus:v3.7.3 test rules /etc/prometheus/alerts.test.yml
+
   images:
     needs: build-and-test
     runs-on: ubuntu-latest

@@ -20,12 +20,13 @@ Core bancário didático para portfólio, desenvolvido com .NET e utilizando exc
 - Depósitos e saques simulados.
 - Transferências entre contas do sistema.
 - Pix simulado, com chaves fictícias, limites e comprovantes.
+- Cartão de débito virtual fictício, com reserva, liquidação integral e cancelamento.
 - Agendamento e cancelamento de operações, quando permitido pelo estado.
 - Comunicação simulada com serviços externos para consultas, comunicações, liquidação e reporte.
 
 ### Evoluções planejadas
 
-- Cartões virtuais de débito e crédito, autorizações e faturas.
+- Cartão de crédito fictício e faturas.
 - Empréstimos fictícios, parcelas e pagamentos.
 - Poupança e simulação de rendimentos.
 - Seguros simulados.
@@ -161,7 +162,7 @@ A API aceita access tokens JWT assinados com RS256 por um provedor OIDC, validan
 | Perfil | Permissões |
 | --- | --- |
 | `operador` | Cadastro de clientes, contas e chaves Pix; todas as consultas |
-| `financeiro` | Criação de depósitos, transferências e operações Pix |
+| `financeiro` | Criação de depósitos, transferências e operações Pix; emissão e movimentação de cartões de débito fictícios |
 | `administrador` | Reprocessamento de operações Pix e gestão de vínculos de contas |
 
 Sem token válido, as rotas protegidas respondem `401`; sem o perfil exigido, `403`. Além do perfil, as rotas de conta exigem o vínculo descrito abaixo. Os perfis e vínculos não substituem gestão de credenciais, proteção contra abuso ou segregação dos cadastros de clientes.
@@ -203,7 +204,7 @@ Content-Type: application/json
 
 Use o emissor e subject exatos emitidos pelo provedor configurado. Concessões e revogações repetidas respondem `204` sem criar novo evento; conta inexistente responde `404`. Alterações efetivas são auditadas com executor e alvo na mesma transação; falha de auditoria reverte a alteração. `AccountAccessAudit` não permite alteração ou exclusão comuns; como a auditoria operacional, exige retenção e proteção administrativas e não impede adulteração por administrador do banco.
 
-Consultas de conta, extrato, depósitos e Pix, criações de depósito, chave ou operação Pix e reprocessamentos Pix exigem vínculo com a conta. Transferências, inclusive consultas e replays, exigem vínculo com origem **e** destino. Sem vínculo, a API responde `404`. Perfis continuam independentes, de modo que administrar vínculos não concede outros perfis.
+Consultas de conta, extrato, depósitos, Pix e cartões, criações de depósito, chave ou operação Pix, reprocessamentos Pix e operações de cartão exigem vínculo com a conta. Transferências, inclusive consultas e replays, exigem vínculo com origem **e** destino. Sem vínculo, a API responde `404`. Perfis continuam independentes, de modo que administrar vínculos não concede outros perfis.
 
 Uma requisição autorizada mantém um bloqueio compartilhado no vínculo até o fim da requisição; a revogação aguarda requisições que já adquiriram esse bloqueio. Quando ela é confirmada, novas verificações não aceitam o vínculo removido. Processamento assíncrono já aceito continua independentemente de revogação. A verificação usa uma segunda conexão PostgreSQL, em pool separado, durante a requisição; dimensione conexões e monitore contenção e timeouts. O bloqueio protege os endpoints da API, não acessos diretos ao banco ou chamadas internas aos serviços.
 
@@ -211,7 +212,7 @@ No modo local `Disabled`, não há verificação ou criação automática de ví
 
 ### Auditoria operacional
 
-Depósitos concluídos, transferências concluídas ou rejeitadas por saldo insuficiente, criação de Pix aceita ou rejeitada por saldo e reprocessamentos Pix aceitos geram eventos na tabela `OperationAuditEvents`. O evento é gravado na **mesma transação** da alteração: se a auditoria falhar, a operação é revertida. Não são criados eventos para repetições idempotentes, conflitos, validações inválidas, autenticação/autorização negada ou reprocessamentos recusados; também não são registrados os processamentos automáticos do worker. Operações anteriores à migration não recebem auditoria retroativa.
+Depósitos concluídos, transferências concluídas ou rejeitadas por saldo insuficiente, criação de Pix aceita ou rejeitada por saldo, reprocessamentos Pix aceitos e emissão, autorização, liquidação e cancelamento de cartões de débito fictícios geram eventos na tabela `OperationAuditEvents`. O evento é gravado na **mesma transação** da alteração: se a auditoria falhar, a operação é revertida. Não são criados eventos para repetições idempotentes, conflitos, validações inválidas, autenticação/autorização negada ou reprocessamentos recusados; também não são registrados os processamentos automáticos do worker. Operações anteriores à migration não recebem auditoria retroativa.
 
 Cada evento contém ação, resultado, ID da operação, data, ID da requisição e executor. Com OIDC são armazenados o emissor e o `sub` do token validado; operações sem um único `sub` e `iss` válidos são recusadas com `403`. No modo local sem autenticação, o executor é `LocalAnonymous`, sem identificação individual. Não são armazenados tokens, chave de idempotência, valores ou corpos de requisições. O `sub` pode identificar uma pessoa dependendo do provedor: use identidades fictícias e trate a tabela como dado restrito.
 
@@ -276,7 +277,39 @@ Depois que o CI passa em um push para `main`, o GitHub Actions constrói e publi
 
 Os pacotes nascem privados mesmo para repositórios públicos e estão sujeitos às cotas do GitHub. Após a primeira publicação, o proprietário pode tornar cada pacote público em **Package settings > Change visibility**; essa mudança é irreversível. Imagens públicas no GHCR não consomem a cota de armazenamento e transferência do GitHub Packages. Consulte os [preços e limites do GitHub Packages](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-packages/about-billing-for-github-packages) antes de utilizar pacotes privados. O workflow usa somente o `GITHUB_TOKEN` do próprio repositório, com permissão de escrita em pacotes no job de publicação.
 
-As imagens não criam nem migram o banco e não incluem RabbitMQ, PostgreSQL, OIDC ou Jaeger. Configuração e segredos devem ser fornecidos pelo ambiente de execução, nunca embutidos nas imagens. Não exponha os serviços publicamente: o simulador não tem autenticação e os modos locais dependem de loopback. Em containers separados, `localhost` se refere ao próprio container; o worker só aceita URL loopback para o simulador, e o exportador OTLP também só aceita loopback. Uma futura implantação precisa resolver essa topologia sem relaxar essas proteções, além de tratar persistência, migrations, autenticação e rede. Apenas dados fictícios devem ser usados.
+As imagens não criam nem migram o banco e não incluem RabbitMQ, PostgreSQL, OIDC ou Jaeger. Configuração e segredos devem ser fornecidos pelo ambiente de execução, nunca embutidos nas imagens. Não exponha os serviços publicamente: o simulador não tem autenticação e os modos locais dependem de loopback. Em containers separados, `localhost` se refere ao próprio container; o worker só aceita URL loopback para o simulador, e o exportador OTLP também só aceita loopback. Apenas dados fictícios devem ser usados.
+
+#### Demonstração isolada das imagens
+
+O arquivo `compose.local.yaml` cria banco e broker próprios, com volumes distintos do Compose principal. API, worker e simulador compartilham o namespace de rede do simulador; a API e o simulador escutam somente em loopback **dentro** desse namespace, sem portas HTTP publicadas no host. O PostgreSQL é publicado em uma porta local aleatória apenas para executar migrations. Esse modo sem autenticação é exclusivamente para demonstração com dados fictícios; administradores Docker e outros processos com acesso ao namespace podem acessar os serviços. Não é implantação pública nem configuração de produção.
+
+Em um terminal PowerShell dedicado, confira que o histórico das migrations até `20261127011543_PersistTraceContext` corresponde ao commit das imagens e não foi alterado. O exemplo usa o conjunto validado no commit `1501d2d4410e5a981d83c1d501f3f258e570f97d` e limita explicitamente a migration a essa versão; não aplique migrations posteriores a essas imagens sem verificar compatibilidade. Gere a senha apenas ao criar volumes novos; ao reutilizá-los, defina a mesma senha alfanumérica usada inicialmente, em vez de gerar outra:
+
+```powershell
+$env:COREBANKING_IMAGE_SHA = '1501d2d4410e5a981d83c1d501f3f258e570f97d'
+# Somente para volumes novos; preserve a senha fora do repositório.
+$env:COREBANKING_DEMO_PASSWORD = [guid]::NewGuid().ToString('N')
+docker compose -p corebanking-demo -f .\compose.local.yaml up -d --wait postgres rabbitmq simulator
+if ($LASTEXITCODE -ne 0) { throw 'Falha ao iniciar as dependências.' }
+$binding = docker compose -p corebanking-demo -f .\compose.local.yaml port postgres 5432
+if ($LASTEXITCODE -ne 0 -or -not $binding) { throw 'Porta do PostgreSQL não encontrada.' }
+$port = ($binding -split ':')[-1]
+$env:ConnectionStrings__Banking = "Host=127.0.0.1;Port=$port;Database=corebanking_demo;Username=corebanking_demo;Password=$env:COREBANKING_DEMO_PASSWORD"
+dotnet ef database update 20261127011543_PersistTraceContext --project .\src\CoreBanking.Infrastructure --startup-project .\src\CoreBanking.Infrastructure
+if ($LASTEXITCODE -ne 0) { throw 'Falha ao aplicar migrations no banco da demonstração.' }
+docker compose -p corebanking-demo -f .\compose.local.yaml up -d api worker
+if ($LASTEXITCODE -ne 0) { throw 'Falha ao iniciar API e worker.' }
+docker compose -p corebanking-demo -f .\compose.local.yaml ps
+```
+
+Após a inicialização, consulte a prontidão por um container temporário no mesmo namespace, sem publicar a API:
+
+```powershell
+$simulator = docker compose -p corebanking-demo -f .\compose.local.yaml ps -q simulator
+docker run --rm --network "container:$simulator" curlimages/curl:8.17.0 --fail --silent --show-error http://127.0.0.1:8080/health/ready
+```
+
+Comandos de API adicionais também devem ser executados nesse namespace. `docker compose -p corebanking-demo -f .\compose.local.yaml down` para os serviços e mantém os volumes; preserve a senha fora do repositório se for reutilizar esses volumes, pois alterar a variável não altera usuários já criados. Para remover os dados fictícios, confira o projeto e os volumes antes de executar `down --volumes`; isso é destrutivo. Se o simulador for recriado, recrie também API e worker para compartilharem o novo namespace. Tracing e o Prometheus local não estão conectados a essa topologia; as imagens publicadas refletem o commit da tag, não alterações locais posteriores.
 
 Para executar o worker em outro terminal, após aplicar as migrations:
 
@@ -356,6 +389,10 @@ Os instrumentos HTTP podem incluir caminhos, nomes de parâmetros, endereços e 
 
 Cada processo usa fila de exportação de até 256 spans e lotes de até 64; spans podem ser descartados por fila cheia, interrupção ou falha do coletor, sem afetar a transação. Ausência de trace não comprova ausência de operação: confira o processo, a conectividade, os logs do Jaeger e os diagnósticos internos do OpenTelemetry. O SDK pode não registrar falhas do exportador nos logs normais da aplicação. O serializador OTLP desta versão solicita um buffer de 750.000 bytes, arredondado pelo pool para aproximadamente 1 MiB no LOH por exportador ativo; isso não foi medido neste cenário e não representa limite total de memória. Meça antes de usar sob carga.
 
+Na máquina Windows usada no desenvolvimento, o Code Integrity bloqueou `OpenTelemetry.Instrumentation.Http.dll` versão `1.21.0.1601`, sem assinatura Authenticode, por não atender ao nível de assinatura exigido pela política Enterprise. Os eventos 3033 e 3077 aparecem em `Microsoft-Windows-CodeIntegrity/Operational`; o worker não inicia com tracing habilitado nessas condições. A validação ponta a ponta passou no CI Linux, mas não confirma a execução local no Windows. Um administrador deve avaliar a origem e a política aplicável e uma solução autorizada; não desative nem contorne as proteções. Após a resolução, repita o teste `TracesConnectApiWorkerRabbitAndSimulator` no Windows e confirme os spans no Jaeger.
+
+A mesma política também bloqueou o carregamento de `CoreBanking.Application.dll` recém-compilada no Windows ao gerar a migration do cartão e executar testes; o build em si passou. Isso impede afirmar que a versão atual roda ou passa nos testes locais do Windows. A migration foi gerada em ambiente Linux isolado; a avaliação administrativa e a repetição dos testes no Windows continuam necessárias.
+
 ### Métricas operacionais
 
 O worker publica instrumentos .NET `System.Diagnostics.Metrics` no meter `CoreBanking.Worker`. Um coletor externo compatível é necessário; nenhum endpoint ou armazenamento de métricas é iniciado automaticamente. Com `dotnet-counters` instalado, por exemplo, use `dotnet-counters monitor --process-id <PID-do-worker> --counters CoreBanking.Worker`. Para HTTP, o ASP.NET Core disponibiliza suas métricas nativas, incluindo `http.server.request.duration` no meter `Microsoft.AspNetCore.Hosting`.
@@ -385,6 +422,32 @@ Com coletor inscrito nas métricas de reconciliação, cada worker consulta até
 A varredura não é um snapshot único do banco: contas criadas ou alterações ocorridas entre lotes podem aparecer somente no próximo ciclo. O tempo para uma volta completa cresce com o número de contas; uma varredura inacabada não significa ausência de divergências. O monitor não verifica outros invariantes contábeis nem corrige saldos. Cada worker executa sua própria varredura e cada conta pode ter histórico extenso: os lotes limitam os registros retornados à aplicação, mas não o custo de somar o histórico no PostgreSQL. Avalie contenção e latência antes de usar em bases grandes.
 
 As tags têm valores limitados, sem identificadores, chaves ou payloads; não há buffer de eventos na aplicação. As consultas de backlog agregam dados no banco, porém podem gerar custo em bases grandes. As medições de LOH abaixo não isolam o custo das métricas ou da reconciliação.
+
+#### Prometheus e Grafana locais
+
+Este conjunto opcional usa uma rede e volumes Compose próprios, separados do banco e broker existentes. O Prometheus recebe métricas OTLP/HTTP do worker a cada 15 segundos; o Grafana apresenta o painel `CoreBanking - Worker`. Execute na raiz do repositório, após conferir que as portas 9090 e 3000 estão livres:
+
+```powershell
+# Somente para volumes novos; preserve a senha fora do repositório.
+$env:COREBANKING_GRAFANA_ADMIN_PASSWORD = [guid]::NewGuid().ToString('N')
+docker compose -p corebanking-observability -f .\compose.observability.yaml up -d
+```
+
+Inicie o worker conforme as instruções anteriores, adicionando no terminal dele:
+
+```powershell
+$env:Metrics__Enabled = 'true'
+$env:Metrics__OtlpEndpoint = 'http://127.0.0.1:9090'
+dotnet run --project .\src\CoreBanking.Worker
+```
+
+O painel fica em `http://127.0.0.1:3000` e os alertas em `http://127.0.0.1:9090/alerts`. Para encerrar os containers, mantendo os volumes de dados, use `docker compose -p corebanking-observability -f .\compose.observability.yaml down`. A senha é obrigatória na configuração do Compose; ao reutilizar volumes existentes, defina a senha original em vez de gerar outra. Para portas diferentes, defina `COREBANKING_PROMETHEUS_PORT` e `COREBANKING_GRAFANA_PORT` e ajuste `Metrics__OtlpEndpoint`.
+
+O Prometheus recebe dados sem autenticação e o Grafana permite leitura anônima; ambos são publicados somente em loopback e destinam-se exclusivamente a dados fictícios em máquina confiável. Outros usuários locais ainda podem acessá-los. A senha administrativa não deve ser compartilhada, e não há isolamento contra administradores Docker. A rede é separada das demais, mas não bloqueia saída para a internet. Não publique essas portas nem use essa configuração em produção. A retenção configurada é de 24 horas ou 256 MB de blocos TSDB, o que ocorrer primeiro; WAL e outros arquivos podem ocupar espaço adicional. Os volumes persistem após `down`.
+
+Os alertas são demonstrações com limiares provisórios: backlog mais antigo acima de 5 minutos, falhas e retries de transferência, divergência contábil, reconciliação desatualizada e ausência de métricas de backlog. As regras ficam no Prometheus; **não há Alertmanager nem envio de notificações**. A ausência de métricas pode demorar vários minutos para ser detectada, não identifica individualmente workers indisponíveis e não prova que a coleta do banco esteja atualizada. As agregações podem ocultar um worker parado enquanto outro segue ativo. Os contadores podem não detectar eventos ocorridos antes da primeira amostra. Uma varredura contábil longa pode gerar alerta de atraso, e ausência da primeira varredura não é coberta pelo alerta de reconciliação desatualizada. Use uma instância de observabilidade por banco/ambiente e não some os gauges globais de workers. A idade observada em entregas RabbitMQ não indica mensagens paradas.
+
+O endpoint de métricas aceita somente origem HTTP em IP loopback literal, sem credenciais, caminho ou parâmetros; exportação desativada é o padrão. O SDK usa o mesmo limite de buffer OTLP descrito para tracing, com custo adicional de memória; não há garantia de entrega das métricas se o Prometheus estiver indisponível. `promtool test rules` pode validar as regras em `observability/alerts.test.yml`.
 
 ### Primeiro fluxo de uso
 
@@ -466,6 +529,13 @@ Referência local de 26/11/2026, mesma máquina acima, build Release:
 
 São valores de uma execução por cenário, sem rede representativa; não comprovam 10.000 requisições/minuto.
 
+Medição adicional em 27/11/2026, na mesma máquina, build Debug, com métricas OTLP para Prometheus habilitadas no worker e tracing desativado pelo bloqueio Windows: quatro produtores, duração mínima configurada de 10 s.
+
+- Falha do worker: 79 Pix em 10,63 s, 16 durante a interrupção; p50 ≤ 100 ms, p95 e p99 ≤ 1.000 ms. LOH após GC amostrado: API 98.384 bytes em 40 amostras; worker não medido durante reinício.
+- Falha do simulador: 180 Pix em 36,91 s, 152 durante a interrupção; p50 ≤ 200 ms, p95 ≤ 500 ms e p99 acima do último limite finito de 10.000 ms. LOH após GC amostrado: API 98.384 bytes e worker 4.070.248 bytes, 40 amostras cada.
+
+A duração efetiva superou a mínima no segundo cenário porque o teste aguardou as condições de interrupção e recuperação. A amostragem inclui período após o tráfego e não isola o custo do exportador. São execuções curtas e não comprovam a meta de 10.000/min nem capacidade sustentada.
+
 ## API
 
 | Método | Endpoint | Finalidade |
@@ -487,8 +557,24 @@ São valores de uma execução por cenário, sem rede representativa; não compr
 | `GET` | `/api/v1/pix/operations/{id}` | Consultar operação Pix |
 | `GET` | `/api/v1/pix/operations/{id}/receipt` | Consultar comprovante Pix |
 | `POST` | `/api/v1/pix/operations/{id}/retry` | Reprocessar operação em revisão |
+| `POST` | `/api/v1/debit-cards` | Emitir cartão fictício para `accountId` |
+| `GET` | `/api/v1/debit-cards/{id}` | Consultar cartão fictício |
+| `POST` | `/api/v1/debit-cards/{id}/authorizations` | Reservar valor em centavos (`amountMinor`) |
+| `GET` | `/api/v1/debit-authorizations/{id}` | Consultar autorização e lançamentos |
+| `POST` | `/api/v1/debit-authorizations/{id}/settle` | Liquidar integralmente uma reserva |
+| `POST` | `/api/v1/debit-authorizations/{id}/cancel` | Cancelar uma reserva e liberar o saldo |
 
-Clientes, contas, depósitos e transferências criados retornam `201 Created`; operações Pix aceitas e reprocessamentos retornam `202 Accepted`. Entradas inválidas retornam `400`. A criação de cliente e conta ainda não implementa idempotência.
+Clientes, contas, depósitos, transferências, cartões e autorizações de débito criados retornam `201 Created`; operações Pix aceitas e reprocessamentos retornam `202 Accepted`. Entradas inválidas retornam `400`. A criação de cliente e conta ainda não implementa idempotência.
+
+### Cartão de débito fictício
+
+O cartão é apenas um identificador associado à conta: não cria nem armazena número de cartão, CVV, validade, bandeira ou dados reais. Não há rede de pagamento, tarifas, fatura, crédito, bloqueio de cartão ou estorno de uma liquidação. O valor da autorização é inteiro em centavos, de 1 a 99.999.999.999.999.999.
+
+Emissão e autorização exigem `Idempotency-Key` de 1 a 128 caracteres, sem espaços nas extremidades, com escopos independentes por conta e tipo de operação. Repetir a emissão retorna o mesmo cartão; repetir uma autorização com mesmo cartão e valor retorna a mesma operação e seu estado atual. Reutilizar a chave de autorização para outro cartão ou valor retorna `409`. Saldo insuficiente é persistido como `InsufficientFunds`, retorna `409` e continua recusado em replays mesmo se o saldo mudar; use uma nova chave para uma nova tentativa.
+
+Uma autorização aprovada fica `Authorized` e transfere o valor disponível para uma conta contábil interna de reserva. `settle` movimenta toda a reserva para compensação fictícia e `cancel` devolve todo o valor à conta; ambos não aceitam corpo. Repetir a mesma finalização retorna o estado existente, sem novos lançamentos; a ação oposta ou a finalização de saldo insuficiente retorna `409`. Em concorrência, somente uma finalização é aplicada. Cada mudança efetiva e seu evento de auditoria são transacionais.
+
+**As reservas não expiram automaticamente:** permanecem bloqueadas até liquidação integral ou cancelamento manual. Guarde o ID retornado para consultar e finalizar; não há listagem operacional de reservas pendentes nesta versão. Há lançamentos de reserva e liberação no extrato. A migration `AddDebitCard` deve ser aplicada antes de usar os endpoints; ela não foi aplicada automaticamente ao banco local existente.
 
 ### Extrato contábil
 
@@ -527,7 +613,7 @@ A organização poderá evoluir durante a implementação, preservando os limite
 
 ## Status
 
-**Implementação inicial.** Clientes, contas, ledger, depósitos, transferências e Pix fictícios estão em desenvolvimento. O simulador não é uma integração real ou homologada. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
+**Implementação inicial.** Clientes, contas, ledger, depósitos, transferências, Pix e cartão de débito fictícios estão em desenvolvimento. O simulador não é uma integração real ou homologada. As entregas seguintes e seus critérios de aceite estão descritos no [Fluxo de desenvolvimento](./DEVELOPMENT_FLOW.md).
 
 ## Referências
 

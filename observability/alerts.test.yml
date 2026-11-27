@@ -1,0 +1,49 @@
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'corebanking_backlog_oldest_age_seconds{queue="pix",instance="w1"}'
+        values: '301x15'
+      - series: 'corebanking_ledger_reconciliation_mismatches{instance="w1"}'
+        values: '1x15'
+      - series: 'corebanking_ledger_reconciliation_completed_seconds{instance="w1"}'
+        values: '0x15'
+      - series: 'corebanking_transfer_messages_total{outcome="retry",instance="w1"}'
+        values: '0 0 1 1 1'
+      - series: 'corebanking_transfer_messages_total{outcome="failed",instance="w1"}'
+        values: '0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CoreBankingBacklogOld
+        exp_alerts:
+          - exp_labels: { queue: pix, severity: warning }
+            exp_annotations: { summary: "Backlog pix acima de 5 minutos" }
+      - eval_time: 3m
+        alertname: CoreBankingLedgerMismatch
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations: { summary: "Divergência detectada na última varredura contábil" }
+      - eval_time: 3m
+        alertname: CoreBankingTransferFailure
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Falha ou mensagem inválida em transferências nos últimos 5 minutos" }
+      - eval_time: 3m
+        alertname: CoreBankingTransferRetries
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Transferência reprocessada nos últimos 5 minutos" }
+      - eval_time: 13m
+        alertname: CoreBankingReconciliationStale
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Nenhuma varredura contábil concluída recentemente" }
+  - interval: 1m
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CoreBankingWorkerMetricsMissing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "Sem métricas de backlog do worker" }

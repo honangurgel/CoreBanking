@@ -30,6 +30,7 @@ internal static class WorkerProgram
 
         builder.Services.AddLocalTracing(builder.Configuration, "corebanking-worker",
             tracing => tracing.AddSource(LocalTracing.SourceName).AddHttpClientInstrumentation());
+        builder.Services.AddLocalWorkerMetrics(builder.Configuration);
 
         builder.Services.AddDbContext<BankingDbContext>(options =>
             options.UseNpgsql(builder.Configuration.GetConnectionString("Banking")

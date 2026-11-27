@@ -1,0 +1,42 @@
+groups:
+  - name: corebanking
+    rules:
+      - alert: CoreBankingBacklogOld
+        expr: max by (queue) (corebanking_backlog_oldest_age_seconds) > 300
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backlog {{ $labels.queue }} acima de 5 minutos"
+      - alert: CoreBankingTransferFailure
+        expr: sum(increase(corebanking_transfer_messages_total{outcome=~"failed|invalid"}[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Falha ou mensagem inválida em transferências nos últimos 5 minutos"
+      - alert: CoreBankingTransferRetries
+        expr: sum(increase(corebanking_transfer_messages_total{outcome="retry"}[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transferência reprocessada nos últimos 5 minutos"
+      - alert: CoreBankingLedgerMismatch
+        expr: max(corebanking_ledger_reconciliation_mismatches) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Divergência detectada na última varredura contábil"
+      - alert: CoreBankingReconciliationStale
+        expr: time() - max(corebanking_ledger_reconciliation_completed_seconds) > 600
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nenhuma varredura contábil concluída recentemente"
+      - alert: CoreBankingWorkerMetricsMissing
+        expr: absent(corebanking_backlog_count)
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sem métricas de backlog do worker"
