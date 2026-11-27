@@ -13,9 +13,15 @@ public static class WorkerMetrics
     private static readonly Gauge<long> BacklogCount = Meter.CreateGauge<long>("corebanking.backlog.count", "{item}");
     private static readonly Gauge<double> BacklogAge = Meter.CreateGauge<double>("corebanking.backlog.oldest.age", "s");
     private static readonly Gauge<long> RabbitReady = Meter.CreateGauge<long>("corebanking.rabbitmq.queue.ready", "{message}");
+    private static readonly Gauge<long> LedgerAccountsChecked = Meter.CreateGauge<long>("corebanking.ledger.reconciliation.accounts", "{account}");
+    private static readonly Gauge<long> LedgerMismatches = Meter.CreateGauge<long>("corebanking.ledger.reconciliation.mismatches", "{account}");
+    private static readonly Gauge<long> LedgerScanStarted = Meter.CreateGauge<long>("corebanking.ledger.reconciliation.started", "s");
+    private static readonly Gauge<long> LedgerScanCompleted = Meter.CreateGauge<long>("corebanking.ledger.reconciliation.completed", "s");
 
     public static bool BacklogEnabled => BacklogCount.Enabled || BacklogAge.Enabled;
     public static bool RabbitReadyEnabled => RabbitReady.Enabled;
+    public static bool LedgerReconciliationEnabled =>
+        LedgerAccountsChecked.Enabled || LedgerMismatches.Enabled || LedgerScanStarted.Enabled || LedgerScanCompleted.Enabled;
     public static void RecordPix(string status) => PixProcessed.Add(1, new KeyValuePair<string, object?>("status", status));
     public static void RecordThrottle() => PixThrottled.Add(1);
     public static void RecordSimulatorDuration(double seconds) => SimulatorDuration.Record(seconds);
@@ -28,4 +34,11 @@ public static class WorkerMetrics
     }
     public static void RecordRabbitReady(string queue, long count) =>
         RabbitReady.Record(count, new KeyValuePair<string, object?>("queue", queue));
+    public static void RecordLedgerReconciliation(long accounts, long mismatches, long started, long completed)
+    {
+        LedgerAccountsChecked.Record(accounts);
+        LedgerMismatches.Record(mismatches);
+        LedgerScanStarted.Record(started);
+        LedgerScanCompleted.Record(completed);
+    }
 }

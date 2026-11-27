@@ -27,6 +27,7 @@ builder.Services.AddScoped<ITransferEventProcessor, TransferEventProcessor>();
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddHostedService<PixWorker>();
 builder.Services.AddHostedService<BacklogMonitor>();
+builder.Services.AddHostedService<LedgerReconciliationMonitor>();
 
 var host = builder.Build();
 host.Run();
