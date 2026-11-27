@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using CoreBanking.Infrastructure;
+using DotNet.Testcontainers.Builders;
 using Microsoft.EntityFrameworkCore;
 using Testcontainers.PostgreSql;
 using Testcontainers.RabbitMq;
@@ -29,6 +31,132 @@ public sealed class PixProcessLoadTests(ITestOutputHelper output) : IAsyncLifeti
     {
         await rabbit.DisposeAsync();
         await postgres.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task TracesConnectApiWorkerRabbitAndSimulator()
+    {
+        await using var jaeger = new ContainerBuilder("jaegertracing/jaeger:2.23.0")
+            .WithPortBinding(4317, true)
+            .WithPortBinding(16686, true)
+            .WithCreateParameterModifier(parameters =>
+            {
+                var bindings = parameters.HostConfig?.PortBindings
+                    ?? throw new InvalidOperationException("Portas do Jaeger não foram configuradas.");
+                foreach (var binding in bindings.Values.SelectMany(value => value))
+                    binding.HostIP = "127.0.0.1";
+            })
+            .Build();
+        await jaeger.StartAsync();
+        var environment = new Dictionary<string, string>
+        {
+            ["ConnectionStrings__Banking"] = postgres.GetConnectionString(),
+            ["RabbitMQ__ConnectionString"] = rabbit.GetConnectionString(),
+            ["Logging__LogLevel__Default"] = "Warning",
+            ["Logging__LogLevel__Microsoft.Hosting.Lifetime"] = "Information",
+            ["ASPNETCORE_ENVIRONMENT"] = "Development",
+            ["DOTNET_ENVIRONMENT"] = "Development",
+            ["Authentication__Mode"] = "Disabled",
+            ["Tracing__Enabled"] = "true",
+            ["Tracing__OtlpEndpoint"] = $"http://127.0.0.1:{jaeger.GetMappedPublicPort(4317)}"
+        };
+        await using var simulator = new ApplicationProcess("CoreBanking.Simulator", environment, "http://127.0.0.1:0");
+        environment["Pix__SimulatorUrl"] = (await simulator.WaitForAddressAsync()).ToString();
+        await using var api = new ApplicationProcess("CoreBanking.Api", environment, "http://127.0.0.1:0");
+        using var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = await api.WaitForAddressAsync() };
+        await using var worker = new ApplicationProcess("CoreBanking.Worker", environment);
+        using var query = new HttpClient(new HttpClientHandler { UseProxy = false })
+        {
+            BaseAddress = new Uri($"http://127.0.0.1:{jaeger.GetMappedPublicPort(16686)}")
+        };
+        var source = await LoadTestHelpers.CreateAccountAsync(client);
+        var destination = await LoadTestHelpers.CreateAccountAsync(client);
+
+        async Task<string> PostAsync(string path, string key, object body)
+        {
+            var traceId = ActivityTraceId.CreateRandom().ToString();
+            using var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create(body) };
+            request.Headers.Add("Idempotency-Key", key);
+            request.Headers.Add("traceparent", $"00-{traceId}-{ActivitySpanId.CreateRandom()}-01");
+            using var response = await client.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+            return traceId;
+        }
+
+        await PostAsync("/api/v1/deposits", "trace-deposit", new { accountId = source, amountMinor = 100 });
+        var transferTrace = await PostAsync("/api/v1/transfers", "trace-transfer",
+            new { sourceAccountId = source, destinationAccountId = destination, amountMinor = 1 });
+        using var keyResponse = await client.PostAsJsonAsync("/api/v1/pix/keys", new { accountId = source });
+        keyResponse.EnsureSuccessStatusCode();
+        var key = (await keyResponse.Content.ReadFromJsonAsync<IdResponse>())!.Id;
+        var pixTrace = await PostAsync("/api/v1/pix/operations", "trace-pix",
+            new { accountId = source, keyId = key, institutionIspb = "00000000", direction = "Incoming", amountMinor = 1, scenario = "Confirm" });
+
+        static JsonElement[] Spans(JsonDocument trace) => trace.RootElement.GetProperty("data")[0]
+            .GetProperty("spans").EnumerateArray().ToArray();
+        static string Id(JsonElement span) => span.GetProperty("spanID").GetString()!;
+        static string? Parent(JsonElement span) => span.GetProperty("references").EnumerateArray()
+            .Where(item => item.GetProperty("refType").GetString() == "CHILD_OF")
+            .Select(item => item.GetProperty("spanID").GetString()).FirstOrDefault();
+
+        async Task<JsonDocument> FindTraceAsync(string traceId, Func<JsonElement[], bool> complete)
+        {
+            var clock = Stopwatch.StartNew();
+            while (clock.Elapsed < TimeSpan.FromSeconds(60))
+            {
+                api.ThrowIfExited();
+                worker.ThrowIfExited();
+                simulator.ThrowIfExited();
+                try
+                {
+                    using var response = await query.GetAsync($"/api/traces/{traceId}");
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+                        var data = document.RootElement.GetProperty("data");
+                        if (data.GetArrayLength() > 0)
+                        {
+                            if (complete(Spans(document))) return document;
+                        }
+                        document.Dispose();
+                    }
+                }
+                catch (HttpRequestException) when (clock.Elapsed < TimeSpan.FromSeconds(60)) { }
+                await Task.Delay(500);
+            }
+            throw new TimeoutException($"O Jaeger não recebeu todos os spans de {traceId}.");
+        }
+
+        using var transfer = await FindTraceAsync(transferTrace, spans =>
+        {
+            var publisher = spans.FirstOrDefault(span => span.GetProperty("operationName").GetString() == "transfer publish");
+            return publisher.ValueKind != JsonValueKind.Undefined
+                && spans.Any(span => Id(span) == Parent(publisher))
+                && spans.Any(span => span.GetProperty("operationName").GetString() == "transfer process");
+        });
+        using var pix = await FindTraceAsync(pixTrace, spans =>
+        {
+            var processing = spans.FirstOrDefault(span => span.GetProperty("operationName").GetString() == "pix process");
+            return processing.ValueKind != JsonValueKind.Undefined
+                && spans.Any(span => Id(span) == Parent(processing))
+                && spans.Any(span => Parent(span) == Id(processing)
+                    && spans.Any(child => Parent(child) == Id(span)));
+        });
+
+        var transferSpans = Spans(transfer);
+        var publisher = Assert.Single(transferSpans, span => span.GetProperty("operationName").GetString() == "transfer publish");
+        var consumer = Assert.Single(transferSpans, span => span.GetProperty("operationName").GetString() == "transfer process");
+        Assert.Contains(transferSpans, span => Id(span) == Parent(publisher));
+        Assert.Equal(Id(publisher), Parent(consumer));
+
+        var pixSpans = Spans(pix);
+        var processing = Assert.Single(pixSpans, span => span.GetProperty("operationName").GetString() == "pix process");
+        Assert.Contains(pixSpans, span => Id(span) == Parent(processing));
+        Assert.Contains(pixSpans, span => Parent(span) == Id(processing)
+            && pixSpans.Any(child => Parent(child) == Id(span)));
+        var processes = pix.RootElement.GetProperty("data")[0].GetProperty("processes");
+        Assert.Contains(pixSpans, span => processes.GetProperty(span.GetProperty("processID").GetString()!)
+            .GetProperty("serviceName").GetString() == "corebanking-simulator");
     }
 
     [Theory]

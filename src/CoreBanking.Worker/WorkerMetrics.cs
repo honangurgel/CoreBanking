@@ -10,6 +10,8 @@ public static class WorkerMetrics
     private static readonly Counter<long> PixThrottled = Meter.CreateCounter<long>("corebanking.pix.throttled", "{attempt}");
     private static readonly Histogram<double> SimulatorDuration = Meter.CreateHistogram<double>("corebanking.pix.simulator.duration", "s");
     private static readonly Counter<long> TransferMessages = Meter.CreateCounter<long>("corebanking.transfer.messages", "{message}");
+    private static readonly Histogram<double> DeliveryAge = Meter.CreateHistogram<double>("corebanking.rabbitmq.delivery.age", "s");
+    private static readonly Counter<long> DeliveryAgeUnavailable = Meter.CreateCounter<long>("corebanking.rabbitmq.delivery.age.unavailable", "{message}");
     private static readonly Gauge<long> BacklogCount = Meter.CreateGauge<long>("corebanking.backlog.count", "{item}");
     private static readonly Gauge<double> BacklogAge = Meter.CreateGauge<double>("corebanking.backlog.oldest.age", "s");
     private static readonly Gauge<long> RabbitReady = Meter.CreateGauge<long>("corebanking.rabbitmq.queue.ready", "{message}");
@@ -26,6 +28,8 @@ public static class WorkerMetrics
     public static void RecordThrottle() => PixThrottled.Add(1);
     public static void RecordSimulatorDuration(double seconds) => SimulatorDuration.Record(seconds);
     public static void RecordTransfer(string outcome) => TransferMessages.Add(1, new KeyValuePair<string, object?>("outcome", outcome));
+    public static void RecordDeliveryAge(double seconds) => DeliveryAge.Record(seconds);
+    public static void RecordDeliveryAgeUnavailable() => DeliveryAgeUnavailable.Add(1);
     public static void RecordBacklog(string queue, long count, double ageSeconds)
     {
         var tag = new KeyValuePair<string, object?>("queue", queue);

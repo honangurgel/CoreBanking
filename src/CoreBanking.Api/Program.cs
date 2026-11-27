@@ -16,9 +16,13 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.Net;
 using System.Threading.RateLimiting;
+using CoreBanking.Telemetry;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddConsole(options => options.FormatterName = "json");
+
+builder.Services.AddLocalTracing(builder.Configuration, "corebanking-api", tracing => tracing.AddAspNetCoreInstrumentation());
 
 var authMode = builder.Configuration["Authentication:Mode"] ?? "Oidc";
 if (authMode is not ("Oidc" or "Disabled"))

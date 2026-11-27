@@ -5,6 +5,7 @@ using System.Text.Json;
 using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Messaging;
 using CoreBanking.Infrastructure.Transfers;
+using CoreBanking.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,6 +15,39 @@ using Testcontainers.PostgreSql;
 using Testcontainers.RabbitMq;
 
 namespace CoreBanking.IntegrationTests;
+
+public sealed class TracingConfigurationTests
+{
+    [Theory]
+    [InlineData("http://example.com:4317")]
+    [InlineData("http://localhost:4317")]
+    [InlineData("https://127.0.0.1:4317")]
+    [InlineData("http://127.0.0.1:4317/path")]
+    [InlineData("http://127.0.0.1:4317/?token=secret")]
+    [InlineData("http://user:password@127.0.0.1:4317")]
+    public void EnabledTracing_RejectsNonLocalOrUnsafeEndpoints(string endpoint)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Tracing:Enabled"] = "true",
+            ["Tracing:OtlpEndpoint"] = endpoint
+        }).Build();
+        Assert.Throws<InvalidOperationException>(() =>
+            new ServiceCollection().AddLocalTracing(config, "test", _ => { }));
+    }
+
+    [Fact]
+    public void DisabledTracing_DoesNotConfigureExporter()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Tracing:OtlpEndpoint"] = "http://example.com"
+        }).Build();
+        var services = new ServiceCollection();
+        services.AddLocalTracing(config, "test", _ => throw new InvalidOperationException());
+        Assert.Empty(services);
+    }
+}
 
 public sealed class MessagingWorkerTests : IAsyncLifetime
 {
@@ -158,7 +192,12 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             await using var channel = await connection.CreateChannelAsync();
             var duplicate = JsonSerializer.SerializeToUtf8Bytes(new { MessageId = messageId, TransferId = transferId });
             await channel.BasicPublishAsync("", "corebanking.transfers.completed", duplicate);
-            await channel.BasicPublishAsync("", "corebanking.transfers.completed", Encoding.UTF8.GetBytes("invalid json"));
+            await channel.BasicPublishAsync("", "corebanking.transfers.completed", mandatory: true,
+                basicProperties: new BasicProperties
+                {
+                    Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds()),
+                    Headers = new Dictionary<string, object?> { ["traceparent"] = new string('x', 55) }
+                }, body: Encoding.UTF8.GetBytes("invalid json"));
 
             await WaitForAsync(async () =>
             {
@@ -179,6 +218,11 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
             Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "published");
             Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "acknowledged");
             Assert.Contains(metrics.Counts, item => item.Name == "corebanking.transfer.messages" && item.Tag == "invalid");
+            Assert.True(metrics.Counts.Count(item => item.Name == "corebanking.rabbitmq.delivery.age.unavailable") >= 3);
+            Assert.Contains(metrics.Durations, item => item.Name == "corebanking.rabbitmq.delivery.age" && item.Value >= 0);
+            Assert.Contains(logs.Entries, item =>
+                item.Properties.GetValueOrDefault("{OriginalFormat}") is string message
+                && message.Contains("Cabeçalho de rastreamento inválido"));
             Assert.Contains(metrics.Counts, item => item.Name == "corebanking.rabbitmq.queue.ready"
                 && item.Tag == CoreBanking.Worker.TransferQueues.Main && item.Value >= 0);
         }
@@ -196,6 +240,17 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
     public async Task ProcessingFailures_AreRetriedAndCanBeReprocessed(int failures)
     {
         using var metrics = new WorkerMetricRecorder();
+        var traceId = ActivityTraceId.CreateRandom();
+        var parentId = ActivitySpanId.CreateRandom();
+        var traceParent = $"00-{traceId}-{parentId}-01";
+        var spans = new ConcurrentQueue<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == "CoreBanking.Worker",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = spans.Enqueue
+        };
+        ActivitySource.AddActivityListener(listener);
         var transferId = Guid.NewGuid();
         var messageId = Guid.NewGuid();
         await using (var db = CreateContext())
@@ -210,7 +265,10 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
                 Status = "Completed",
                 CreatedAt = DateTimeOffset.UtcNow
             });
-            db.OutboxMessages.Add(new OutboxMessage { Id = messageId, TransferId = transferId, CreatedAt = DateTimeOffset.UtcNow });
+            db.OutboxMessages.Add(new OutboxMessage
+            {
+                Id = messageId, TransferId = transferId, CreatedAt = DateTimeOffset.UtcNow, TraceParent = traceParent
+            });
             await db.SaveChangesAsync();
         }
 
@@ -244,6 +302,14 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
                 {
                     Assert.False(await before.InboxMessages.AnyAsync(item => item.Id == messageId));
                 }
+                var failed = await channel.BasicGetAsync(CoreBanking.Worker.TransferQueues.Failed, autoAck: false);
+                Assert.NotNull(failed);
+                Assert.True(failed.BasicProperties.IsTimestampPresent());
+                Assert.True(failed.BasicProperties.Timestamp.UnixTime > 0);
+                Assert.True(failed.BasicProperties.Headers!.TryGetValue("traceparent", out var failedParent));
+                Assert.True(failedParent is byte[]);
+                Assert.StartsWith($"00-{traceId}-", Encoding.ASCII.GetString((byte[])failedParent));
+                await channel.BasicNackAsync(failed.DeliveryTag, multiple: false, requeue: true);
                 Assert.True(await CoreBanking.Worker.TransferQueues.ReprocessNextAsync(channel, CancellationToken.None));
             }
 
@@ -252,6 +318,22 @@ public sealed class MessagingWorkerTests : IAsyncLifetime
                 await using var db = CreateContext();
                 return await db.InboxMessages.AnyAsync(item => item.Id == messageId);
             }, worker);
+            await WaitForAsync(() => Task.FromResult(spans.Count(item =>
+                item.TraceId == traceId && item.OperationName == "transfer process") == failures + 1), worker);
+            var traceSpans = spans.Where(item => item.TraceId == traceId).ToArray();
+            var producer = Assert.Single(traceSpans, item => item.OperationName == "transfer publish");
+            Assert.Equal(parentId, producer.ParentSpanId);
+            var consumers = traceSpans.Where(item => item.OperationName == "transfer process").ToArray();
+            var retries = traceSpans.Where(item => item.OperationName == "transfer retry publish").ToArray();
+            Assert.Equal(failures, retries.Length);
+            Assert.Equal(producer.SpanId, consumers[0].ParentSpanId);
+            for (var index = 0; index < failures; index++)
+            {
+                Assert.Equal(consumers[index].SpanId, retries[index].ParentSpanId);
+                Assert.Equal(retries[index].SpanId, consumers[index + 1].ParentSpanId);
+            }
+            Assert.True(metrics.Durations.Count(item => item.Name == "corebanking.rabbitmq.delivery.age") >= failures + 1);
+            Assert.Contains(metrics.Durations, item => item.Name == "corebanking.rabbitmq.delivery.age" && item.Value >= 2);
             Assert.Equal(failures + 1, processor.Attempts);
             var times = processor.AttemptTimes.ToArray();
             Assert.True(times[1] - times[0] >= TimeSpan.FromMilliseconds(900));

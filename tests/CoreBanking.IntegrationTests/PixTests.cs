@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Diagnostics;
+using System.Collections.Concurrent;
 using CoreBanking.Application.Pix;
 using CoreBanking.Infrastructure;
 using CoreBanking.Simulator;
@@ -45,10 +47,11 @@ public sealed class PixTests : IAsyncLifetime
         return (await accountResponse.Content.ReadFromJsonAsync<IdResponse>())!.Id;
     }
 
-    private static async Task<HttpResponseMessage> SubmitAsync(HttpClient client, PixRequest operation, string key)
+    private static async Task<HttpResponseMessage> SubmitAsync(HttpClient client, PixRequest operation, string key, string? traceParent = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/pix/operations");
         request.Headers.Add("Idempotency-Key", key);
+        if (traceParent is not null) request.Headers.Add("traceparent", traceParent);
         request.Content = JsonContent.Create(operation);
         return await client.SendAsync(request);
     }
@@ -64,6 +67,47 @@ public sealed class PixTests : IAsyncLifetime
 
     private static async Task<long> BalanceAsync(HttpClient client, Guid account) =>
         (await client.GetFromJsonAsync<AccountResponse>($"/api/v1/accounts/{account}"))!.BalanceMinor;
+
+    [Fact]
+    public async Task PixTraceContext_IsPersistedAndRestoredForProcessing()
+    {
+        var spans = new ConcurrentQueue<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name is "CoreBanking.Worker" or "Microsoft.AspNetCore",
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            SampleUsingParentId = (ref ActivityCreationOptions<string> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = spans.Enqueue
+        };
+        ActivitySource.AddActivityListener(listener);
+        using var api = CreateApi();
+        using var client = api.CreateClient();
+        using var simulator = new WebApplicationFactory<SimulatorAssemblyMarker>();
+        using var simulatorClient = simulator.CreateClient();
+        await using var services = CreateServices();
+        var account = await AccountAsync(client);
+        using var keyResponse = await client.PostAsJsonAsync("/api/v1/pix/keys", new { accountId = account });
+        keyResponse.EnsureSuccessStatusCode();
+        var key = (await keyResponse.Content.ReadFromJsonAsync<IdResponse>())!.Id;
+
+        using var requestActivity = new Activity("pix request").SetIdFormat(ActivityIdFormat.W3C);
+        requestActivity.ActivityTraceFlags = ActivityTraceFlags.Recorded;
+        requestActivity.Start();
+        using var response = await SubmitAsync(client,
+            new PixRequest(account, key, "00000000", "Incoming", 1, "Confirm"), "pix-trace", requestActivity.Id);
+        response.EnsureSuccessStatusCode();
+        var id = (await response.Content.ReadFromJsonAsync<PixResult>())!.Id;
+        requestActivity.Stop();
+
+        await using var db = CreateContext();
+        var saved = (await db.PixOperations.AsNoTracking().SingleAsync(item => item.Id == id)).TraceParent;
+        Assert.True(ActivityContext.TryParse(saved, null, true, out var savedContext));
+        Assert.Equal(requestActivity.TraceId, savedContext.TraceId);
+        Assert.True(await PixWorker.ProcessNextAsync(services.GetRequiredService<IServiceScopeFactory>(),
+            simulatorClient, NullLogger.Instance, CancellationToken.None));
+        var processing = Assert.Single(spans, span => span.OperationName == "pix process" && span.TraceId == savedContext.TraceId);
+        Assert.Equal(savedContext.SpanId, processing.ParentSpanId);
+    }
 
     [Theory]
     [InlineData("Confirm", 600L, "Confirmed")]

@@ -270,6 +270,14 @@ Execute `dotnet test` em outro terminal: os testes de integração exigem Docker
 
 O GitHub Actions também executa restore, build e testes em pushes e pull requests, usando um runner Linux com Docker. Isso permite validar o código no CI sem alterar a política de segurança do Windows, mas não garante que os executáveis serão aceitos localmente.
 
+### Imagens no GitHub Container Registry
+
+Depois que o CI passa em um push para `main`, o GitHub Actions constrói e publica três imagens no GHCR: `ghcr.io/honangurgel/corebanking-api`, `ghcr.io/honangurgel/corebanking-worker` e `ghcr.io/honangurgel/corebanking-simulator`. Cada uma recebe a tag `sha-<commit-completo>`; branches e pull requests apenas constroem as imagens, sem publicá-las. A publicação das três imagens é independente: se alguma falhar, corrija e execute o workflow novamente antes de considerar o conjunto completo. Não há tag `latest`, promoção automática ou deploy em um servidor.
+
+Os pacotes nascem privados mesmo para repositórios públicos e estão sujeitos às cotas do GitHub. Após a primeira publicação, o proprietário pode tornar cada pacote público em **Package settings > Change visibility**; essa mudança é irreversível. Imagens públicas no GHCR não consomem a cota de armazenamento e transferência do GitHub Packages. Consulte os [preços e limites do GitHub Packages](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-packages/about-billing-for-github-packages) antes de utilizar pacotes privados. O workflow usa somente o `GITHUB_TOKEN` do próprio repositório, com permissão de escrita em pacotes no job de publicação.
+
+As imagens não criam nem migram o banco e não incluem RabbitMQ, PostgreSQL, OIDC ou Jaeger. Configuração e segredos devem ser fornecidos pelo ambiente de execução, nunca embutidos nas imagens. Não exponha os serviços publicamente: o simulador não tem autenticação e os modos locais dependem de loopback. Em containers separados, `localhost` se refere ao próprio container; o worker só aceita URL loopback para o simulador, e o exportador OTLP também só aceita loopback. Uma futura implantação precisa resolver essa topologia sem relaxar essas proteções, além de tratar persistência, migrations, autenticação e rede. Apenas dados fictícios devem ser usados.
+
 Para executar o worker em outro terminal, após aplicar as migrations:
 
 ```powershell
@@ -328,7 +336,25 @@ A API limita requisições por IP em janela fixa de um minuto, por instância, c
 
 API, worker e simulador emitem logs de console em JSON estruturado. Para acompanhar um Pix, busque `OperationId` (o `id` retornado pela API) nos logs da API, do worker e do simulador. Para transferências, busque `TransferId`; o worker também registra `MessageId` na publicação e no consumo, inclusive em falhas e reentregas. A API registra `RequestId` junto ao identificador retornado para vincular cada requisição à operação; replays idempotentes mantêm o mesmo identificador de operação. Reprocessamentos Pix registram se foram aceitos. Logs após processamento indicam o estado persistido, não garantem que uma linha foi emitida antes de uma interrupção.
 
-Esta é uma correlação por identificador de negócio, não tracing distribuído de spans. Não são registrados corpos, chaves de idempotência ou valores nos eventos adicionados; configure e proteja também os logs do framework e da infraestrutura. O projeto não armazena logs em banco nem em buffers próprios: configure coleta e retenção externamente. As mensagens registram apenas campos pequenos e não serializam payloads inteiros; os resultados limitados de memória e vazão estão nos cenários de carga abaixo.
+Essa correlação por identificador de negócio é independente do tracing opcional abaixo. Não são registrados corpos, chaves de idempotência ou valores nos eventos adicionados; configure e proteja também os logs do framework e da infraestrutura. O projeto não armazena logs em banco nem em buffers próprios: configure coleta e retenção externamente. As mensagens registram apenas campos pequenos e não serializam payloads inteiros; os resultados limitados de memória e vazão estão nos cenários de carga abaixo.
+
+### Tracing distribuído local
+
+O tracing OpenTelemetry é desativado por padrão. Para visualização gratuita e local, após aplicar as migrations, inicie somente o serviço opcional e configure **cada terminal** antes de iniciar API, worker e simulador:
+
+```powershell
+docker compose --profile tracing up -d jaeger
+$env:Tracing__Enabled = "true"
+$env:Tracing__OtlpEndpoint = "http://127.0.0.1:4317"
+```
+
+Inicie os três processos conforme as seções anteriores e abra `http://127.0.0.1:16686`. Os serviços no Jaeger são `corebanking-api`, `corebanking-worker` e `corebanking-simulator`. Para desativar, remova ou defina `Tracing__Enabled` como `false` e reinicie cada processo. O endpoint OTLP aceita somente origem HTTP com IP literal loopback, sem caminho ou credenciais; o exportador não usa proxy nem segue redirects. O Jaeger armazena os traces em memória, sem autenticação e sem persistência: não exponha suas portas e espere perda do histórico ao reiniciar. Encerre-o com `docker compose --profile tracing stop jaeger` quando terminar.
+
+A API persiste o `traceparent` W3C gravado na operação Pix ou na Outbox; o worker o restaura e propaga nas mensagens e na chamada HTTP ao simulador. Retries RabbitMQ geram novos spans e preservam o contexto; no retry manual Pix, uma nova requisição rastreada substitui o contexto anterior. Registros antigos ou contextos inválidos podem iniciar outro trace. Não são persistidos `tracestate` nem `baggage`. O runtime pode propagar ou registrar um contexto recebido mesmo sem o exportador habilitado, dependendo de listeners ativos. Uma reversão da migration remove as colunas de contexto de tracing; ela não remove as operações.
+
+Os instrumentos HTTP podem incluir caminhos, nomes de parâmetros, endereços e metadados. Não envie dados reais, credenciais ou segredos em URLs; a redação padrão de valores de query não protege nomes de parâmetros ou caminhos. Não configure captura de cabeçalhos ou corpos sensíveis. Proteja também as mensagens e o banco, que agora contêm identificadores de trace.
+
+Cada processo usa fila de exportação de até 256 spans e lotes de até 64; spans podem ser descartados por fila cheia, interrupção ou falha do coletor, sem afetar a transação. Ausência de trace não comprova ausência de operação: confira o processo, a conectividade, os logs do Jaeger e os diagnósticos internos do OpenTelemetry. O SDK pode não registrar falhas do exportador nos logs normais da aplicação. O serializador OTLP desta versão solicita um buffer de 750.000 bytes, arredondado pelo pool para aproximadamente 1 MiB no LOH por exportador ativo; isso não foi medido neste cenário e não representa limite total de memória. Meça antes de usar sob carga.
 
 ### Métricas operacionais
 
@@ -343,12 +369,16 @@ O worker publica instrumentos .NET `System.Diagnostics.Metrics` no meter `CoreBa
 | `corebanking.backlog.count` | Quantidade de Pix pendentes ou mensagens Outbox não publicadas, por `queue`. |
 | `corebanking.backlog.oldest.age` | Idade em segundos do registro mais antigo dessas filas, ou zero se vazias. |
 | `corebanking.rabbitmq.queue.ready` | Mensagens prontas em cada fila de transferências, sem incluir entregas ainda não confirmadas. |
+| `corebanking.rabbitmq.delivery.age` | Histograma em segundos entre a publicação de cada cópia pela Outbox e cada entrega observada pelo worker. |
+| `corebanking.rabbitmq.delivery.age.unavailable` | Entregas sem timestamp válido para calcular o tempo, inclusive mensagens antigas. |
 | `corebanking.ledger.reconciliation.accounts` | Contas contábeis verificadas no último ciclo completo. |
 | `corebanking.ledger.reconciliation.mismatches` | Contas cujo saldo projetado divergiu da soma das partidas confirmadas no último ciclo completo. |
 | `corebanking.ledger.reconciliation.started` | Início do último ciclo completo, em segundos Unix no relógio do worker. |
 | `corebanking.ledger.reconciliation.completed` | Conclusão do último ciclo completo, em segundos Unix no relógio do worker. |
 
-As contagens são eventos por processo, não totais financeiros: reinícios, replays e falhas entre transação e emissão podem gerar perda ou duplicidade. Os indicadores de backlog consultam o PostgreSQL a cada 30 segundos somente enquanto houver um coletor inscrito; as filas RabbitMQ são consultadas no mesmo intervalo enquanto o worker estiver conectado e houver coletor. Erros são registrados e não produzem uma amostra de sucesso. As amostras são globais ao banco ou broker, portanto **não devem ser somadas entre workers**. Incluem Pix pendentes aguardando retry, mas não medem idade das mensagens RabbitMQ, operações em revisão nem disponibilidade do worker. Uma amostra antiga não é prova de saúde; monitore também o horário da coleta e a prontidão.
+As contagens são eventos por processo, não totais financeiros: reinícios, replays e falhas entre transação e emissão podem gerar perda ou duplicidade. Os indicadores de backlog consultam o PostgreSQL a cada 30 segundos somente enquanto houver um coletor inscrito; as filas RabbitMQ são consultadas no mesmo intervalo enquanto o worker estiver conectado e houver coletor. Erros são registrados e não produzem uma amostra de sucesso. As amostras são globais ao banco ou broker, portanto **não devem ser somadas entre workers**. Incluem Pix pendentes aguardando retry, mas não medem operações em revisão nem disponibilidade do worker. Uma amostra antiga não é prova de saúde; monitore também o horário da coleta e a prontidão.
+
+O tempo de entrega RabbitMQ é observado somente quando uma mensagem é recebida, não é a idade atual da mensagem mais antiga nem detecta uma fila parada. O timestamp tem resolução de segundos e depende dos relógios; retries e reprocessamentos o preservam, por isso uma mesma mensagem pode gerar várias amostras que incluem os atrasos anteriores. Uma nova publicação após falha antes da confirmação na Outbox gera outra cópia com novo timestamp. Timestamp ausente, zero ou futuro incrementa o contador de indisponibilidade e gera aviso, sem registrar idade zero artificial.
 
 Com coletor inscrito nas métricas de reconciliação, cada worker consulta até 100 contas contábeis por ciclo de 30 segundos, incluindo contas internas. Cada lote compara a projeção com a soma das partidas de lançamentos confirmados em uma única consulta consistente; somente uma varredura completa emite as quatro métricas. Divergências também geram aviso sem identificadores de contas. Falhas do banco são registradas, descartam o progresso parcial e reiniciam a varredura; a última amostra pode ficar desatualizada. Monitore o horário de conclusão, o início da varredura e a ausência de amostras, além do número de divergências.
 

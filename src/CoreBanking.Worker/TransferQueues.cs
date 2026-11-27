@@ -49,8 +49,11 @@ public static class TransferQueues
         {
             Persistent = true,
             MessageId = delivery.BasicProperties.MessageId,
-            ContentType = delivery.BasicProperties.ContentType
+            ContentType = delivery.BasicProperties.ContentType,
+            Headers = delivery.BasicProperties.Headers is { } headers && headers.TryGetValue(MessageTracing.Header, out var parent)
+                ? new Dictionary<string, object?> { [MessageTracing.Header] = parent } : null
         };
+        if (delivery.BasicProperties.IsTimestampPresent()) properties.Timestamp = delivery.BasicProperties.Timestamp;
         await channel.BasicPublishAsync("", Main, mandatory: true, basicProperties: properties,
             body: delivery.Body, cancellationToken: cancellationToken);
         await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);

@@ -41,6 +41,13 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+  jaeger:
+    profiles: ["tracing"]
+    image: jaegertracing/jaeger:2.23.0
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:16686:16686"
+
 volumes:
   postgres_data:
   rabbitmq_data:

@@ -58,4 +58,40 @@ public sealed class LedgerBackfillMigrationTests : IAsyncLifetime
         Assert.False(await verification.Accounts.AnyAsync(item => item.Id == account.Id));
         Assert.False(await verification.LedgerAccounts.AnyAsync(item => item.CustomerAccountId == account.Id));
     }
+
+    [Fact]
+    public async Task TraceMigration_PreservesExistingOperationsAndMessages()
+    {
+        var options = new DbContextOptionsBuilder<BankingDbContext>()
+            .UseNpgsql(postgres.GetConnectionString()).Options;
+        await using var db = new BankingDbContext(options);
+        var migrator = db.GetService<IMigrator>();
+        await migrator.MigrateAsync("20261126150000_ScopeIdempotencyByAccount");
+        var customer = Customer.Create("Cliente fictício existente");
+        var account = Account.Open(customer.Id);
+        db.Customers.Add(customer);
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+        var transferId = Guid.NewGuid();
+        var messageId = Guid.NewGuid();
+        var pixId = Guid.NewGuid();
+        var destination = Guid.NewGuid();
+        var key = Guid.NewGuid();
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+            INSERT INTO "Transfers" ("Id", "IdempotencyKey", "SourceAccountId", "DestinationAccountId", "AmountMinor", "Status", "CreatedAt")
+            VALUES ({transferId}, {"legacy-transfer"}, {account.Id}, {destination}, {1L}, {"Completed"}, now());
+            INSERT INTO "OutboxMessages" ("Id", "TransferId", "CreatedAt") VALUES ({messageId}, {transferId}, now());
+            INSERT INTO "PixOperations" ("Id", "IdempotencyKey", "AccountId", "KeyId", "InstitutionIspb", "Direction",
+                "AmountMinor", "Scenario", "Status", "CreatedAt", "Attempts", "NextAttemptAt")
+            VALUES ({pixId}, {"legacy-pix"}, {account.Id}, {key}, {"00000000"}, {"Incoming"},
+                {1L}, {"Confirm"}, {"Pending"}, now(), {0}, now());
+            """);
+        await migrator.MigrateAsync();
+        var outbox = await db.OutboxMessages.AsNoTracking().SingleAsync(item => item.Id == messageId);
+        var pix = await db.PixOperations.AsNoTracking().SingleAsync(item => item.Id == pixId);
+        Assert.Equal(transferId, outbox.TransferId);
+        Assert.Null(outbox.TraceParent);
+        Assert.Equal("Pending", pix.Status);
+        Assert.Null(pix.TraceParent);
+    }
 }
