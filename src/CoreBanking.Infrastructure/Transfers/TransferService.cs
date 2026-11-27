@@ -73,7 +73,8 @@ public sealed class TransferService(BankingDbContext db) : ITransferService
         await new LedgerWriter(db).PostWithinTransactionAsync(entry, cancellationToken);
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE \"Transfers\" SET \"Status\" = {"Completed"}, \"LedgerEntryId\" = {entry.Id} WHERE \"Id\" = {id}", cancellationToken);
-        db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), TransferId = id, CreatedAt = now });
+        db.OutboxMessages.Add(new OutboxMessage { Id = Guid.NewGuid(), TransferId = id, CreatedAt = now,
+            TraceParent = TraceContext.Capture() });
         await db.SaveChangesAsync(cancellationToken);
         await OperationAuditWriter.WriteAsync(db, actor, "Transfer", "Completed", id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);

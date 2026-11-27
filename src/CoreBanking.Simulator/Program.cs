@@ -1,3 +1,6 @@
+using CoreBanking.Telemetry;
+using OpenTelemetry.Trace;
+
 namespace CoreBanking.Simulator;
 
 public static class SimulatorProgram
@@ -6,6 +9,7 @@ public static class SimulatorProgram
     {
         var builder = WebApplication.CreateBuilder(args);
         builder.Logging.AddConsole(options => options.FormatterName = "json");
+        builder.Services.AddLocalTracing(builder.Configuration, "corebanking-simulator", tracing => tracing.AddAspNetCoreInstrumentation());
         var app = builder.Build();
 
         app.MapGet("/health", () => Results.Ok(new { status = "Healthy", simulated = true }));

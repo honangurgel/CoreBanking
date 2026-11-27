@@ -1,7 +1,9 @@
 using System.Data.Common;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Diagnostics;
 using CoreBanking.Infrastructure;
+using CoreBanking.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Exceptions;
@@ -78,8 +80,16 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
             return false;
         }
 
+        using var activity = LocalTracing.StartWorkerActivity("transfer publish", ActivityKind.Producer, message.TraceParent, logger);
         var body = JsonSerializer.SerializeToUtf8Bytes(new TransferCompleted(message.Id, message.TransferId));
-        var properties = new BasicProperties { Persistent = true, MessageId = message.Id.ToString(), ContentType = "application/json" };
+        var properties = new BasicProperties
+        {
+            Persistent = true,
+            MessageId = message.Id.ToString(),
+            ContentType = "application/json",
+            Timestamp = new AmqpTimestamp(DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+            Headers = MessageTracing.Headers(activity?.Id ?? message.TraceParent)
+        };
         await channel.BasicPublishAsync("", TransferQueues.Main, mandatory: true, basicProperties: properties, body: body, cancellationToken: cancellationToken);
         message.PublishedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
@@ -96,6 +106,18 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
         if (delivery is null)
         {
             return false;
+        }
+
+        var traceParent = MessageTracing.ReadParent(delivery.BasicProperties.Headers, logger);
+        using var activity = LocalTracing.StartWorkerActivity("transfer process", ActivityKind.Consumer, traceParent, logger);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (delivery.BasicProperties.IsTimestampPresent() && delivery.BasicProperties.Timestamp.UnixTime > 0
+            && delivery.BasicProperties.Timestamp.UnixTime <= now)
+            WorkerMetrics.RecordDeliveryAge(now - delivery.BasicProperties.Timestamp.UnixTime);
+        else
+        {
+            WorkerMetrics.RecordDeliveryAgeUnavailable();
+            logger.LogWarning("Tempo de entrega indisponível: timestamp da mensagem ausente ou inválido.");
         }
 
         TransferCompleted? message;
@@ -159,13 +181,15 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
                 };
                 logger.LogError(exception, "Falha ao processar mensagem {MessageId} da transferência {TransferId}, tentativa {Attempt}; destino {Destination}.",
                     message.MessageId, message.TransferId, attempt, destination);
+                using var retryActivity = LocalTracing.Source.StartActivity("transfer retry publish", ActivityKind.Producer);
                 var properties = new BasicProperties
                 {
                     Persistent = true,
                     MessageId = message.MessageId.ToString(),
                     ContentType = "application/json",
-                    Headers = new Dictionary<string, object?> { [TransferQueues.AttemptHeader] = attempt + 1 }
+                    Headers = MessageTracing.Headers(retryActivity?.Id ?? activity?.Id ?? traceParent, attempt + 1)
                 };
+                if (delivery.BasicProperties.IsTimestampPresent()) properties.Timestamp = delivery.BasicProperties.Timestamp;
                 await channel.BasicPublishAsync("", destination, mandatory: true, basicProperties: properties,
                     body: delivery.Body, cancellationToken: cancellationToken);
                 handled = false;
@@ -191,6 +215,7 @@ public sealed class Worker(IServiceScopeFactory scopeFactory, IConfiguration con
             ContentType = delivery.BasicProperties.ContentType,
             Headers = delivery.BasicProperties.Headers
         };
+        if (delivery.BasicProperties.IsTimestampPresent()) properties.Timestamp = delivery.BasicProperties.Timestamp;
         await channel.BasicPublishAsync("", TransferQueues.Failed, mandatory: true, basicProperties: properties,
             body: delivery.Body, cancellationToken: cancellationToken);
         await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);

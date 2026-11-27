@@ -63,6 +63,7 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
             entity.Property(operation => operation.Direction).HasMaxLength(8).IsRequired();
             entity.Property(operation => operation.Scenario).HasMaxLength(8).IsRequired();
             entity.Property(operation => operation.Status).HasMaxLength(32).IsRequired();
+            entity.Property(operation => operation.TraceParent).HasMaxLength(55);
             entity.HasOne<Account>().WithMany().HasForeignKey(operation => operation.AccountId).OnDelete(DeleteBehavior.Restrict);
             entity.ToTable("PixOperations", table =>
             {
@@ -97,6 +98,7 @@ public sealed class BankingDbContext(DbContextOptions<BankingDbContext> options)
             {
                 entity.HasKey(message => message.Id);
                 entity.HasIndex(message => message.TransferId).IsUnique();
+                entity.Property(message => message.TraceParent).HasMaxLength(55);
                 entity.HasOne<TransferRecord>().WithMany().HasForeignKey(message => message.TransferId)
                     .OnDelete(DeleteBehavior.Restrict);
             });

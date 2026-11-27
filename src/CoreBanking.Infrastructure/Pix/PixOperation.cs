@@ -16,4 +16,5 @@ public sealed class PixOperation
     public Guid? SettlementEntryId { get; set; }
     public int Attempts { get; set; }
     public DateTimeOffset NextAttemptAt { get; set; }
+    public string? TraceParent { get; set; }
 }

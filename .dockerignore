@@ -1,0 +1,8 @@
+**
+!src/
+!src/**/
+!src/**/*.cs
+!src/**/*.csproj
+!src/**/appsettings.json
+src/**/bin/
+src/**/obj/

@@ -60,11 +60,12 @@ public sealed class PixService(BankingDbContext db) : IPixService
         var id = Guid.NewGuid();
         var clock = DateTimeOffset.UtcNow;
         var now = clock.AddTicks(-(clock.Ticks % 10));
+        var traceParent = TraceContext.Capture();
         var inserted = await db.Database.ExecuteSqlInterpolatedAsync($"""
             INSERT INTO "PixOperations" ("Id", "IdempotencyKey", "AccountId", "KeyId", "InstitutionIspb", "Direction",
-                "AmountMinor", "Scenario", "Status", "CreatedAt", "Attempts", "NextAttemptAt")
+                "AmountMinor", "Scenario", "Status", "CreatedAt", "Attempts", "NextAttemptAt", "TraceParent")
             VALUES ({id}, {key}, {request.AccountId}, {request.KeyId}, {request.InstitutionIspb}, {request.Direction},
-                {request.AmountMinor}, {request.Scenario}, {"Pending"}, {now}, {0}, now())
+                {request.AmountMinor}, {request.Scenario}, {"Pending"}, {now}, {0}, now(), {traceParent})
             ON CONFLICT ("AccountId", "IdempotencyKey") DO NOTHING
             """, cancellationToken);
         if (inserted == 0)
@@ -111,6 +112,7 @@ public sealed class PixService(BankingDbContext db) : IPixService
             $"""SELECT * FROM "PixOperations" WHERE "Id" = {id} FOR UPDATE""").SingleOrDefaultAsync(cancellationToken);
         if (operation is null || operation.Status != "RequiresReview") return false;
         operation.Status = "Pending";
+        operation.TraceParent = TraceContext.Capture() ?? operation.TraceParent;
         operation.Attempts = 0;
         operation.NextAttemptAt = await db.Database.SqlQueryRaw<DateTimeOffset>("SELECT now() AS \"Value\"").SingleAsync(cancellationToken);
         AddTransition(db, operation);

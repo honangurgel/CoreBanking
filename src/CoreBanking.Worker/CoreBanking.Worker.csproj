@@ -15,5 +15,6 @@
   <ItemGroup>
     <ProjectReference Include="..\CoreBanking.Application\CoreBanking.Application.csproj" />
     <ProjectReference Include="..\CoreBanking.Infrastructure\CoreBanking.Infrastructure.csproj" />
+    <ProjectReference Include="..\CoreBanking.Telemetry\CoreBanking.Telemetry.csproj" />
   </ItemGroup>
 </Project>

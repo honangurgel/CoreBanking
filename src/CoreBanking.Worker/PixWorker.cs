@@ -5,6 +5,7 @@ using System.Diagnostics;
 using CoreBanking.Domain.Ledger;
 using CoreBanking.Infrastructure;
 using CoreBanking.Infrastructure.Pix;
+using CoreBanking.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -69,6 +70,7 @@ public sealed class PixWorker(IServiceScopeFactory scopeFactory, IConfiguration 
             return false;
         }
 
+        using var activity = LocalTracing.StartWorkerActivity("pix process", ActivityKind.Consumer, operation.TraceParent, logger);
         SimulatedResult? result = null;
         var requiresReview = false;
         var started = Stopwatch.GetTimestamp();
