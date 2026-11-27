@@ -57,9 +57,14 @@ jobs:
         if: matrix.component == 'simulator'
         run: |
           container="$(docker run --detach --rm --publish 127.0.0.1::8080 "$IMAGE")"
-          trap 'docker stop "$container" >/dev/null' EXIT
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then docker logs "$container"; fi
+            docker stop "$container" >/dev/null
+          }
+          trap cleanup EXIT
           address="$(docker port "$container" 8080)"
-          curl --fail --retry 20 --retry-connrefused --retry-delay 1 "http://127.0.0.1:${address##*:}/health"
+          curl --fail --retry 20 --retry-all-errors --retry-delay 1 --max-time 2 "http://127.0.0.1:${address##*:}/health"
 
       - name: Sign in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
